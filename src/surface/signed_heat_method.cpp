@@ -32,8 +32,9 @@ VertexData<double> SignedHeatSolver::computeDistance(const std::vector<Curve>& c
                                                      const std::vector<SurfacePoint>& points,
                                                      const SignedHeatOptions& options) {
 
-  Vector<std::complex<double>> Xt = integrateVectorHeatFlow(curves, points, options);
-  return integrateVectorField(Xt, curves, points, options);
+  std::vector<Curve> processedCurves = preprocessCurves(curves);
+  Vector<std::complex<double>> Xt = integrateVectorHeatFlow(processedCurves, points, options);
+  return integrateVectorField(Xt, processedCurves, points, options);
 }
 
 VertexData<double> SignedHeatSolver::computeDistance(const std::vector<Curve>& curves,
@@ -54,6 +55,34 @@ void SignedHeatSolver::setDiffusionTimeCoefficient(double tCoef_) {
   timeUpdated = true;
   shortTime = tCoef_ * meanNodeDistance * meanNodeDistance;
   doubleVectorOp = doubleMassMat + shortTime * doubleConnectionLaplacian;
+}
+
+std::vector<Curve> SignedHeatSolver::preprocessCurves(const std::vector<Curve>& curves) const {
+  // If there are gaps in the curves (i.e. curves are not sampled densely along the mesh), then there is an ambiguity of
+  // how to connect up the points into curves.
+  // Rather than, for example, automatically connecting up curves using a geodesic path -- which would impose curves
+  // that the user might not have meant -- we simply break up the input curves into components that do reflect how
+  // they're sampled. (This may, however, create curves with fewer than 2 nodes, which would get ignored.)
+  std::vector<Curve> newCurves;
+  for (const Curve& curve : curves) {
+    newCurves.emplace_back();
+    newCurves.back().isSigned = curve.isSigned;
+    size_t nNodes = curve.nodes.size();
+    for (size_t i = 0; i < nNodes - 1; i++) {
+      const SurfacePoint& pA = curve.nodes[i];
+      const SurfacePoint& pB = curve.nodes[i + 1];
+      newCurves.back().nodes.push_back(pA);
+      Face commonFace = sharedFace(pA, pB);
+      if (commonFace == Face()) {
+        // Create new curve
+        newCurves.emplace_back();
+        newCurves.back().isSigned = curve.isSigned;
+      }
+    }
+    // Don't forget the last point
+    newCurves.back().nodes.push_back(curve.nodes[nNodes - 1]);
+  }
+  return newCurves;
 }
 
 Vector<std::complex<double>> SignedHeatSolver::integrateVectorHeatFlow(const std::vector<Curve>& curves,
