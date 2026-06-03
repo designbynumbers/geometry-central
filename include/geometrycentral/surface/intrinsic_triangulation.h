@@ -120,6 +120,15 @@ public:
   // Returns the smallest angle in the intrinsic triangulation, in degrees
   double minAngleDegrees() const;
 
+  // Minimum angle (degrees) between two fixed (marked or boundary) edges that
+  // meet at a vertex -- the smallest angular sector spanned between consecutive
+  // fixed edges around any vertex. This is an UPPER BOUND on the min angle any
+  // delaunayRefine can achieve: a wedge bounded by two fixed edges cannot be
+  // widened, so no refinement exceeds it. With only boundary edges fixed (e.g.
+  // Stage A) it reports the sharpest boundary corner. Returns -1 if no vertex
+  // has two incident fixed edges. Invariant: minFixedAngleDegrees >= minAngle.
+  double minFixedAngleDegrees() const;
+
   // Returns the smallest angle in the intrinsic triangulation, in degrees, among faces whose vertices
   // all have angle sum at least minAngleSum, and which are not contained in an original face incident
   // on a vertex with small angle sum
