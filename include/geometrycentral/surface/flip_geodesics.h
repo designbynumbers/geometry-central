@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geometrycentral/surface/intrinsic_triangulation.h"
 #include "geometrycentral/surface/manifold_surface_mesh.h"
 #include "geometrycentral/surface/signpost_intrinsic_triangulation.h"
 #include "geometrycentral/surface/vertex_position_geometry.h"
@@ -93,8 +94,24 @@ class FlipEdgeNetwork {
 public:
   // === Constructors
 
-  // Construct a network from a collection of paths
+  // Construct a network from a collection of paths. Builds and OWNS a fresh
+  // SignpostIntrinsicTriangulation on top of inputGeom; `paths` are halfedges
+  // of mesh_ (remapped by index into the freshly-built intrinsic mesh).
   FlipEdgeNetwork(ManifoldSurfaceMesh& mesh_, IntrinsicGeometryInterface& inputGeom,
+                  const std::vector<std::vector<Halfedge>>& paths,
+                  VertexData<bool> extraMarkedVerts = VertexData<bool>());
+
+  // Construct a network that BORROWS an existing intrinsic triangulation
+  // (e.g. a refined IntegerCoordinatesIntrinsicTriangulation), mutating it in
+  // place via standard IntrinsicTriangulation methods rather than building a
+  // fresh SignpostIntrinsicTriangulation. `paths` are halfedges of
+  // existingTri.intrinsicMesh (used directly, NOT remapped). The caller
+  // retains ownership of existingTri, which must outlive this network.
+  //
+  // Rewinding (supportRewinding) is only available when the borrowed
+  // triangulation is itself a SignpostIntrinsicTriangulation; it relies on
+  // signpost-only state (signpostAngle / edgeIsOriginal / flipEdgeManual).
+  FlipEdgeNetwork(IntrinsicTriangulation& existingTri,
                   const std::vector<std::vector<Halfedge>>& paths,
                   VertexData<bool> extraMarkedVerts = VertexData<bool>());
 
@@ -123,8 +140,16 @@ public:
 
   // === Properties
 
-  // The triangulation that the path is defined on
-  std::unique_ptr<SignpostIntrinsicTriangulation> tri;
+  // The triangulation that the path is defined on. `tri` is the working
+  // pointer used throughout; `ownedTri` holds ownership only when this
+  // network built its own SignpostIntrinsicTriangulation (the borrowing
+  // constructor leaves ownedTri null and points tri at a caller-owned IT).
+  // `signpostTri` is a non-null view of `tri` exactly when `tri` is a
+  // SignpostIntrinsicTriangulation, used to fast-path the angle primitive
+  // and to gate signpost-only rewind state; null on the borrowed-base path.
+  std::unique_ptr<IntrinsicTriangulation> ownedTri;
+  IntrinsicTriangulation* tri = nullptr;
+  SignpostIntrinsicTriangulation* signpostTri = nullptr;
   ManifoldSurfaceMesh& mesh; // the intrinsic mesh
 
   // The collection of paths which make up the network
