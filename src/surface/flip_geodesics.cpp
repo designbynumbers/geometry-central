@@ -368,12 +368,15 @@ std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromPiecewiseDijkstra
 }
 
 
-std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldSurfaceMesh& mesh_,
-                                                                       IntrinsicGeometryInterface& geom,
-                                                                       const EdgeData<bool>& inPath,
-                                                                       const VertexData<bool>& extraMarkedVertices) {
-  ManifoldSurfaceMesh& mesh = mesh_;
+namespace {
 
+// Walk a marked edge set into open paths (between endpoint vertices -- those
+// with != 2 incident path edges, plus any extraMarkedVertices) and closed
+// loops, as sequences of consecutive halfedges. Shared by both
+// constructFromEdgeSet overloads.
+std::vector<std::vector<Halfedge>> inferPathsFromEdgeSet(ManifoldSurfaceMesh& mesh,
+                                                         const EdgeData<bool>& inPath,
+                                                         const VertexData<bool>& extraMarkedVertices) {
   std::vector<std::vector<Halfedge>> allHalfedges;
 
   // Endpoint vertices will be those with != 2 incident path edges
@@ -448,7 +451,26 @@ std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldS
     } while (heCurr != heStart);
   }
 
+  return allHalfedges;
+}
+
+} // namespace
+
+std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldSurfaceMesh& mesh_,
+                                                                       IntrinsicGeometryInterface& geom,
+                                                                       const EdgeData<bool>& inPath,
+                                                                       const VertexData<bool>& extraMarkedVertices) {
+  std::vector<std::vector<Halfedge>> allHalfedges = inferPathsFromEdgeSet(mesh_, inPath, extraMarkedVertices);
   return std::unique_ptr<FlipEdgeNetwork>(new FlipEdgeNetwork(mesh_, geom, allHalfedges));
+}
+
+std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(IntrinsicTriangulation& existingTri,
+                                                                       const EdgeData<bool>& inPath,
+                                                                       const VertexData<bool>& extraMarkedVertices) {
+  std::vector<std::vector<Halfedge>> allHalfedges =
+      inferPathsFromEdgeSet(*existingTri.intrinsicMesh, inPath, extraMarkedVertices);
+  return std::unique_ptr<FlipEdgeNetwork>(
+      new FlipEdgeNetwork(existingTri, allHalfedges, extraMarkedVertices));
 }
 
 
