@@ -5,7 +5,9 @@
 #include "geometrycentral/surface/trace_geodesic.h"
 #include "geometrycentral/utilities/elementary_geometry.h"
 
+#include <cstdlib>
 #include <iomanip>
+#include <iostream>
 #include <queue>
 
 
@@ -115,6 +117,52 @@ double IntrinsicTriangulation::minAngleDegrees() const {
     minAngle = std::fmin(minAngle, cornerAngle(c));
   }
   return minAngle * 180. / M_PI;
+}
+
+double IntrinsicTriangulation::minFixedAngleDegrees() const {
+  const bool dbg = std::getenv("GC_FIXEDANGLE_DEBUG") != nullptr;
+  double minSector = std::numeric_limits<double>::infinity();
+  Vertex minV;
+  for (Vertex v : mesh.vertices()) {
+    // Pick a starting fixed, interior outgoing halfedge. For a boundary vertex
+    // prefer a boundary edge so the CCW walk spans the whole interior fan.
+    int nFixed = 0;
+    Halfedge start;
+    for (Halfedge he : v.outgoingHalfedges()) {
+      if (!isFixed(he.edge())) continue;
+      nFixed++;
+      if (!he.isInterior()) continue;
+      if (v.isBoundary() && he.edge().isBoundary()) {
+        start = he;
+      } else if (start == Halfedge()) {
+        start = he;
+      }
+    }
+    if (nFixed < 2 || start == Halfedge()) continue;
+
+    // Walk CCW: he.corner() is the wedge between he.edge() and the next
+    // outgoing edge he.next().next().twin().edge(). Accumulate corner angles
+    // between consecutive fixed edges; the smallest such sum is the sharpest
+    // wedge bounded by two fixed edges at v.
+    double acc = 0.0;
+    Halfedge he = start;
+    while (true) {
+      if (!he.isInterior()) break;  // reached the exterior boundary halfedge
+      acc += cornerAngle(he.corner());
+      he = he.next().next().twin();  // advance to next outgoing edge
+      if (isFixed(he.edge())) {
+        if (acc < minSector) { minSector = acc; minV = v; }
+        acc = 0.0;
+        if (he == start) break;  // completed the cycle
+      }
+    }
+  }
+  if (dbg && !std::isinf(minSector)) {
+    std::cout << "[minFixedAngle] " << minSector * 180. / M_PI << " deg at v"
+              << minV.getIndex() << " bdry=" << (int)minV.isBoundary()
+              << std::endl;
+  }
+  return std::isinf(minSector) ? -1.0 : minSector * 180. / M_PI;
 }
 
 // If f is entirely contained in some face of the input mesh, return that
