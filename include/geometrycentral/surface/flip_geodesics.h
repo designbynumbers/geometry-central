@@ -132,6 +132,14 @@ public:
                                                                const EdgeData<bool>& inPath,
                                                                const VertexData<bool>& extraMarkedVertices);
 
+  // Same edge-set inference, but BORROWING an existing IntrinsicTriangulation
+  // (mutated in place via the borrowing constructor) rather than building a
+  // fresh SignpostIntrinsicTriangulation. `inPath` / `extraMarkedVertices`
+  // are keyed on existingTri.intrinsicMesh.
+  static std::unique_ptr<FlipEdgeNetwork> constructFromEdgeSet(IntrinsicTriangulation& existingTri,
+                                                               const EdgeData<bool>& inPath,
+                                                               const VertexData<bool>& extraMarkedVertices);
+
 
   // add a path to an existing network
   // input should be a vector of INTRINSIC halfedges
