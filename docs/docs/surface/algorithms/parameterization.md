@@ -102,3 +102,64 @@ publisher = {ACM},
 address = {New York, NY, USA}
 }
 ```
+
+## Cone Parameterization
+
+Surfaces with significant Gaussian curvature cannot be flattened to the plane with low area distortion. _Cone parameterization_ addresses this by introducing a small number of _cone singularities_, which concentrate the curvature at isolated points, and cutting the surface open along geodesic slits connecting the cones (and the boundary) so it becomes a topological disk. The disk is then flattened with [Boundary First Flattening](#boundary-first-flattening), prescribing the cone curvatures and laying out the boundary so that the **two sides of every cut have equal length** -- a _seamless_ map, whose cuts can be re-joined without stretch mismatch. This follows the cone strategy of the [Boundary First Flattening](http://www.cs.cmu.edu/~kmcrane/Projects/BoundaryFirstFlattening/paper.pdf) paper.
+
+These routines depend only on the _intrinsic_ geometry (via the `IntrinsicGeometryInterface`).
+
+### Cone Placement
+
+`#include "geometrycentral/surface/cone_placement.h"`
+
+??? func "`#!cpp ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo, size_t nCones)`"
+    Automatically select up to `nCones` interior cone singularities which minimize area distortion, using the greedy "CETM" strategy: starting from an anchor set (all boundary vertices for a surface with boundary, or the extreme-curvature vertex for a closed surface), repeatedly solve for the conformal scale-factor field and add the vertex of largest scale factor as the next cone. The mesh may be closed or have boundary.
+
+    Returns a `ConePlacementResult` with:
+
+    - `#!cpp std::vector<Vertex> cones` -- the chosen interior cone vertices.
+    - `#!cpp VertexData<double> coneAngles` -- the prescribed target angle at each cone (and boundary) vertex, normalized so the total prescribed curvature satisfies the discrete Gauss-Bonnet theorem (sum $= 2\pi\chi$); zero at ordinary interior vertices.
+
+### Cone Cutting
+
+`#include "geometrycentral/surface/cone_cut.h"`
+
+??? func "`#!cpp ConeCutResult computeConeCut(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo, const std::vector<Vertex>& cones)`"
+    Compute geodesic slits which reduce the surface to a single topological disk passing through the given cones. The cut _topology_ is an approximate minimum-weight (by edge length) Steiner tree connecting all boundary loops and cone vertices; the cut _geometry_ is then straightened to geodesics by a [`FlipEdgeNetwork`](flip_geodesics.md) on an internally-built intrinsic triangulation, so the slits are smooth rather than jagged mesh-edge polylines. Boundary edges are never cut. For a closed surface at least two cones are required.
+
+    Returns a `ConeCutResult` with:
+
+    - `#!cpp std::unique_ptr<FlipEdgeNetwork> network` -- owns the intrinsic triangulation the cut is defined on (`network->mesh`), with edge lengths from `network->tri`.
+    - `#!cpp EdgeData<bool> cutEdges` -- the geodesic cut edges (keyed on `network->mesh`). Cutting along these with `surgery::cutAlongEdges` yields a disk.
+
+### Seamless Cone Parameterization
+
+`#include "geometrycentral/surface/cone_parameterization.h"`
+
+??? func "`#!cpp ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo, size_t nCones)`"
+    Conformally flatten a surface with `nCones` automatically-placed cone singularities, producing a seamless map of the resulting cut disk. Composes `computeConePlacement` and `computeConeCut`, then flattens the cut disk with the cone curvatures prescribed and the two sides of each slit constrained to equal length. Requires a surface _with boundary_ (the scale-factor solve is anchored at the original boundary).
+
+    Returns a `ConeParameterizationResult` with:
+
+    - `#!cpp std::unique_ptr<ManifoldSurfaceMesh> cutMesh` and `#!cpp std::unique_ptr<EdgeLengthGeometry> cutGeometry` -- the cut disk and its intrinsic geometry.
+    - `#!cpp VertexData<Vector2> uvs` -- the flattening, per vertex of `cutMesh`.
+    - `#!cpp std::vector<Vertex> cones` -- the interior cone vertices that were placed (vertices of the input `mesh`).
+    - `#!cpp EdgeData<int> boundarySeamId` -- for each boundary edge of `cutMesh`, the id of the original edge it came from; the two sides of a slit share an id, and the flattening guarantees both sides have equal length.
+
+Example:
+```cpp
+#include "geometrycentral/surface/cone_parameterization.h"
+#include "geometrycentral/surface/meshio.h"
+
+// Load a mesh with boundary (e.g. a disk patch)
+std::unique_ptr<ManifoldSurfaceMesh> mesh;
+std::unique_ptr<VertexPositionGeometry> geometry;
+std::tie(mesh, geometry) = readManifoldSurfaceMesh(filename);
+
+// Flatten with 4 cones, seamlessly
+ConeParameterizationResult result = parameterizeBFFwithCones(*mesh, *geometry, 4);
+// result.uvs holds the UV coordinates on result.cutMesh
+```
+
+These routines use the same citation as Boundary First Flattening above.
