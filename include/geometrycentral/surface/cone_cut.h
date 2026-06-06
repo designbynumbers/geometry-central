@@ -34,15 +34,10 @@ struct ConeCutResult {
 // geodesics by a FlipEdgeNetwork on an internally-built intrinsic
 // triangulation, so the slits are smooth rather than jagged mesh-edge polylines.
 //
-// Boundary edges are never cut. Cones are vertices of `mesh`.
-//
-// For a surface WITH BOUNDARY, cutting along the result (e.g. with
-// surgery::cutAlongEdges) yields a single topological disk -- this is the
-// intended use. For a CLOSED surface the result is a valid geodesic tree
-// connecting the cones, but opening it into a disk requires interior-slit
-// cutting (a cut whose endpoints are interior vertices), which gc's
-// surgery::cutAlongEdges / ManifoldSurfaceMesh::separateEdge does not yet
-// support; at least two cones are required in that case.
+// Boundary edges are never cut. Cones are vertices of `mesh`. Cutting along the
+// result (e.g. with surgery::cutAlongEdges) yields a single topological disk.
+// For a closed surface at least two cones are required (the tree connecting them
+// must have at least one edge).
 ConeCutResult computeConeCut(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo,
                              const std::vector<Vertex>& cones);
 
