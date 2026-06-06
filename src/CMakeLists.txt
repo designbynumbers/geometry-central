@@ -20,6 +20,7 @@ SET(SRCS
   surface/base_geometry_interface.cpp
   surface/boundary_first_flattening.cpp
   surface/cone_placement.cpp
+  surface/cone_cut.cpp
   surface/intrinsic_geometry_interface.cpp
   surface/extrinsic_geometry_interface.cpp
   surface/exact_geodesic_helpers.cpp
