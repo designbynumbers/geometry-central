@@ -110,6 +110,7 @@ set(TEST_SRCS
   src/flip_geodesic_test.cpp
   src/cone_placement_test.cpp
   src/cone_cut_test.cpp
+  src/cone_parameterization_test.cpp
   src/stl_reader_test.cpp
   src/surface_misc_test.cpp
   src/utilities_test.cpp
