@@ -2099,24 +2099,31 @@ IntegerCoordinatesIntrinsicTriangulation::traceNextCurve(const NormalCoordinates
         }
       }
 
-      // Look for a non-shared curve
+      // Look for a non-shared curve: the continuation leaves through exactly
+      // one corner with a strict crossing, other than the incoming corner.
+      // SKIP corners that carry no crossing (and the incoming corner itself)
+      // rather than failing on them -- at an inserted (Edge-typed) vertex of
+      // nontrivial degree, most corners carry no curve.
       for (Corner c : v.adjacentCorners()) {
-        if (normalCoordinates.strictDegree(c) > 0 && c != incomingCorner) {
+        if (c == incomingCorner) {
+          if (normalCoordinates.strictDegree(c) == 2) {
+            // The curve enters and leaves through the same corner.
+            throw std::runtime_error("Your geometry is really really bad");
+          }
+          continue;
+        }
+        if (normalCoordinates.strictDegree(c) > 0) {
           GC_SAFETY_ASSERT(normalCoordinates.strictDegree(c) == 1, "there can only be one");
           // we found a curve. And it's different than
           // oldCurve since it's not a shared edge
           return {true, normalCoordinates.topologicalTrace(c, 0)};
-        } else if (normalCoordinates.strictDegree(c) == 2) {
-          throw std::runtime_error("Your geometry is really really bad");
-          GC_SAFETY_ASSERT(c == incomingCorner, "there can only be one");
-
-          return {true, normalCoordinates.topologicalTrace(c.halfedge().next(), finalPos)};
-
-        } else {
-          throw std::runtime_error("this shouldn't be possible");
-          return {false, NormalCoordinatesCurve{}};
         }
       }
+      // An Edge-typed vertex lies in the interior of its input edge, so a
+      // continuation (shared sub-edge or transverse curve) must exist.
+      throw std::runtime_error("traceNextCurve: no curve continuation found at "
+                               "an inserted Edge-typed vertex (inconsistent "
+                               "normal coordinates)");
     } else {
       return {false, NormalCoordinatesCurve{}};
     }
