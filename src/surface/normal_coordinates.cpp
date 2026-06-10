@@ -1080,9 +1080,25 @@ std::array<int, 3> computeVertexInsertionCrossingCounts(Vector3 bary,
   // ns[i] is the normal coordinate of the edge opposite vertex i
   std::array<size_t, 3> ns{njk, nki, nij};
 
-  int ci = cornerCoord(njk, nki, nij);
-  int cj = cornerCoord(nki, nij, njk);
-  int ck = cornerCoord(nij, njk, nki);
+  // Compute *doubled* corner coordinates: corners with emanating curves have
+  // half-integer corner coordinates (e.g. -1/2), which integer division
+  // truncates to 0. That would misclassify a face with emanating curves as a
+  // "triforce" face below, so we branch on the doubled (integer) values.
+  auto doubledCornerCoord = [](int dnij, int dnjk, int dnki) -> int {
+    // doubled coordinate of the corner opposite edge ij
+    return dnjk + dnki - dnij - static_cast<int>(strictDegree(dnjk, dnki, dnij)) -
+           static_cast<int>(strictDegree(dnki, dnij, dnjk));
+  };
+  int ci2 = doubledCornerCoord(njk, nki, nij);
+  int cj2 = doubledCornerCoord(nki, nij, njk);
+  int ck2 = doubledCornerCoord(nij, njk, nki);
+
+  // When the doubled coordinate is even, this is the ordinary corner
+  // coordinate. (When it is odd--i.e. the corner has emanating curves--the
+  // corner takes the fan role below and its cs[] entry is unused.)
+  int ci = ci2 / 2;
+  int cj = cj2 / 2;
+  int ck = ck2 / 2;
 
   std::array<int, 3> cs{ci, cj, ck};
 
@@ -1158,7 +1174,7 @@ std::array<int, 3> computeVertexInsertionCrossingCounts(Vector3 bary,
     return crossings;
   };
 
-  if (ci >= 0 && cj >= 0 && ck >= 0) {
+  if (ci2 >= 0 && cj2 >= 0 && ck2 >= 0) {
     // Triforce
     int iCrossings = cornerSection(0);
     int jCrossings = cornerSection(1);
@@ -1227,9 +1243,9 @@ std::array<int, 3> computeVertexInsertionCrossingCounts(Vector3 bary,
     };
 
     int iCrossings, jCrossings, kCrossings;
-    if (ci < 0) {
+    if (ci2 < 0) {
       std::tie(iCrossings, jCrossings, kCrossings) = fanCrossings(0, 1, 2);
-    } else if (cj < 0) {
+    } else if (cj2 < 0) {
       std::tie(jCrossings, kCrossings, iCrossings) = fanCrossings(1, 2, 0);
     } else {
       std::tie(kCrossings, iCrossings, jCrossings) = fanCrossings(2, 0, 1);
