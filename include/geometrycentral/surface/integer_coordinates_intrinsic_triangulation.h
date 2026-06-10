@@ -123,6 +123,18 @@ public:
   // Inverse to traceInputEdge
   Halfedge identifyInputEdge(const NormalCoordinatesCurve& path, bool verbose = false) const;
 
+  // Identify the input edge along which a transverse curve component lies,
+  // together with the range of the input edge spanned by the component.
+  // Returns (inputHe, tStart, tEnd): the component runs along inputHe from
+  // tStart to tEnd in inputHe's parameterization. In particular, a point at
+  // parameter t along the component lies at tStart + t * (tEnd - tStart)
+  // along inputHe.
+  // Unlike identifyInputEdge, this handles components which begin or end at
+  // inserted vertices lying on the input edge (e.g. vertices added by
+  // splitting an edge which runs along an input edge); such components span
+  // only part of the input edge.
+  std::tuple<Halfedge, double, double> identifyInputCurveRange(const NormalCoordinatesCurve& path) const;
+
   // Identify shared halfedge, throw exception if halfedge is not shared
   // (i.e. edgeCoords[he.edge()] must be negative)
   Halfedge identifyInputEdge(Halfedge he) const;
