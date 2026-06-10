@@ -258,6 +258,63 @@ TEST_F(IntrinsicInsertionSuite, BoundaryInsertDelete) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// Regression test: tracing an input edge through an inserted vertex must
+// scan the vertex's whole fan of corners for the curve's continuation.
+// traceNextCurve used to throw on the first corner with no crossing, which
+// fails whenever the shared sub-edges left by a shared-edge split are
+// later flipped away (e.g. by flipToDelaunay), leaving an Edge-typed vertex
+// with only transverse continuations.
+TEST_F(IntrinsicInsertionSuite, TraceThroughInsertedVertexAfterFlips) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.flipToDelaunay();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  // Split shared edges, then flip the two shared sub-edges away so that the
+  // input edge continues through the inserted vertex transversally on both
+  // sides. (Splitting the surrounding faces first adds edges at the inserted
+  // vertex, which makes the shared sub-edges geometrically flippable.)
+  int nIsolated = 0;
+  size_t nOrigEdges = im.nEdges();
+  for (size_t iE = 0; iE < nOrigEdges; iE++) {
+    Edge e = im.edge(iE);
+    if (tri.normalCoordinates[e] != -1 || e.isBoundary()) continue;
+
+    Vertex v = tri.splitEdge(e, 0.5);
+    ASSERT_NE(v, Vertex());
+
+    std::vector<Face> neighborhood;
+    for (Face f : v.adjacentFaces()) neighborhood.push_back(f);
+    for (Face f : neighborhood) tri.splitFace(f, Vector3{1. / 3., 1. / 3., 1. / 3.});
+
+    std::vector<Edge> sharedSubEdges;
+    for (Edge ve : v.adjacentEdges()) {
+      if (tri.normalCoordinates[ve] < 0) sharedSubEdges.push_back(ve);
+    }
+    for (Edge se : sharedSubEdges) tri.flipEdgeIfPossible(se);
+
+    bool anyShared = false;
+    for (Edge ve : v.adjacentEdges()) anyShared = anyShared || (tri.normalCoordinates[ve] < 0);
+    if (!anyShared) {
+      nIsolated++;
+      // Directly trace the input edge through the isolated vertex, in both
+      // directions; the trace must continue through it (multiple components)
+      Edge inputE = tri.vertexLocations[v].edge;
+      NormalCoordinatesCompoundCurve cc = tri.traceInputHalfedge(inputE.halfedge());
+      EXPECT_GE(cc.components.size(), 2u);
+      NormalCoordinatesCompoundCurve ccRev = tri.traceInputHalfedge(inputE.halfedge().twin());
+      EXPECT_GE(ccRev.components.size(), 2u);
+    }
+
+    if (nIsolated >= 5) break;
+  }
+  EXPECT_GT(nIsolated, 0); // at least one vertex is in the regression configuration
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
 TEST_F(IntrinsicInsertionSuite, ClosedMeshProbe) {
   probeMesh(getAsset("fox.ply", true), 7, 500);
 }
