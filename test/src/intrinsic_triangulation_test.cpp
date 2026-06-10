@@ -153,6 +153,71 @@ TEST_F(IntrinsicTriangulationSuite, SignpostEquivalentPoint) {
   }
 }
 
+TEST_F(IntrinsicTriangulationSuite, IntegerEquivalentPoint) {
+  for (const MeshAsset& a : {getAsset("fox.ply", true), getAsset("cat_head.obj", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+    tri.flipToDelaunay();
+
+    // Insert and delete a few vertices so that the correspondence is
+    // nontrivial (and includes inserted vertices along input edges)
+    std::mt19937 mt(7);
+    auto randBary = [&]() {
+      std::uniform_real_distribution<double> dist(0.0, 1.0);
+      double r1 = dist(mt);
+      double r2 = dist(mt);
+      Vector3 bary{1 - std::sqrt(r1), std::sqrt(r1) * (1 - r2), std::sqrt(r1) * r2};
+      return bary;
+    };
+    for (int i = 0; i < 10; i++) {
+      std::uniform_int_distribution<size_t> fDist(0, tri.intrinsicMesh->nFaces() - 1);
+      tri.splitFace(tri.intrinsicMesh->face(fDist(mt)), randBary());
+      std::uniform_int_distribution<size_t> eDist(0, tri.intrinsicMesh->nEdges() - 1);
+      std::uniform_real_distribution<double> tDist(0.2, 0.8);
+      tri.splitEdge(tri.intrinsicMesh->edge(eDist(mt)), tDist(mt));
+    }
+
+    auto roundtripTest = [&](SurfacePoint origPoint) {
+      Vector3 origPos = origPoint.interpolate(origGeometry.vertexPositions);
+
+      // Map to the intrinsic surface
+      SurfacePoint intPoint = tri.equivalentPointOnIntrinsic(origPoint);
+
+      // Map back to the input surface
+      SurfacePoint returnPoint = tri.equivalentPointOnInput(intPoint);
+
+      // Check that the result is close to where we started
+      Vector3 returnPos = returnPoint.interpolate(origGeometry.vertexPositions);
+
+      EXPECT_LT((origPos - returnPos).norm(), 1e-5);
+    };
+
+    // Pick a bunch of face points and map them back and forth; verify we get very similar locations
+    for (Face f : mesh.faces()) {
+      SurfacePoint origPoint(f, randBary());
+      roundtripTest(origPoint);
+    }
+
+    // Test a few vertex points & edge points
+    roundtripTest(SurfacePoint(mesh.vertex(12)));
+    roundtripTest(SurfacePoint(mesh.vertex(42)));
+    roundtripTest(SurfacePoint(mesh.vertex(55)));
+    roundtripTest(SurfacePoint(mesh.edge(55), 0.4));
+    roundtripTest(SurfacePoint(mesh.edge(55), 0.01));
+    roundtripTest(SurfacePoint(mesh.edge(55), 0.99));
+    roundtripTest(SurfacePoint(mesh.edge(11), 0.99));
+    for (int i = 0; i < 50; i++) {
+      std::uniform_int_distribution<size_t> eDist(0, mesh.nEdges() - 1);
+      std::uniform_real_distribution<double> tDist(0.0, 1.0);
+      roundtripTest(SurfacePoint(mesh.edge(eDist(mt)), tDist(mt)));
+    }
+  }
+}
+
 TEST_F(IntrinsicTriangulationSuite, IntegerEdgeTraceAgreesWithBulk) {
   for (const MeshAsset& a : {getAsset("fox.ply", true), getAsset("cat_head.obj", true)}) {
     a.printThyName();
