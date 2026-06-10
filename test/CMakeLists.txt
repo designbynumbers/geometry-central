@@ -102,6 +102,7 @@ set(TEST_SRCS
   src/halfedge_mesh_test.cpp
   src/halfedge_mutation_test.cpp
   src/intrinsic_triangulation_test.cpp
+  src/intrinsic_insertion_test.cpp
   src/linear_algebra_test.cpp
   src/load_test_meshes.cpp
   src/point_cloud_test.cpp
