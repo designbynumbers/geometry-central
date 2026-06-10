@@ -164,9 +164,131 @@ std::vector<SurfacePoint> IntegerCoordinatesIntrinsicTriangulation::traceInputHa
 }
 
 SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnIntrinsic(const SurfacePoint& pointOnInput) {
-  // TODO
-  throw std::runtime_error("equivalentPointOnIntrinsic not implemented");
-  return SurfacePoint(Vertex());
+  // Note: the edge and face cases below read off the answer from the common
+  // subdivision; the first such query after a mutation pays to (re)construct
+  // it, while subsequent queries are cheap.
+
+  switch (pointOnInput.type) {
+  case SurfacePointType::Vertex: {
+    // Input vertices appear in the intrinsic mesh with the same indices
+    return SurfacePoint(intrinsicMesh->vertex(pointOnInput.vertex.getIndex()));
+  }
+  case SurfacePointType::Edge: {
+    Edge eA = pointOnInput.edge;
+    double tA = pointOnInput.tEdge;
+
+    CommonSubdivision& cs = getCommonSubdivision();
+    const std::vector<CommonSubdivisionPoint*>& pts = cs.pointsAlongA[eA];
+
+    // The t-value along eA of a subdivision point on eA
+    auto tAlongA = [&](const CommonSubdivisionPoint* p) -> double {
+      switch (p->intersectionType) {
+      case CSIntersectionType::VERTEX_VERTEX:
+        // an input vertex: must be one of eA's endpoints
+        return (p->posA.vertex == src(eA)) ? 0. : 1.;
+      default:
+        return p->posA.tEdge;
+      }
+    };
+
+    // Walk the segments of eA between consecutive subdivision points and
+    // find the one containing tA. Shared segments are encoded as a triple
+    // (vertex, EDGE_PARALLEL marker, vertex); transverse segments connect
+    // consecutive non-parallel points.
+    for (size_t i = 0; i + 1 < pts.size(); i++) {
+      CommonSubdivisionPoint* pStart = pts[i];
+      if (pStart->intersectionType == CSIntersectionType::EDGE_PARALLEL) continue;
+
+      bool parallelSegment = (pts[i + 1]->intersectionType == CSIntersectionType::EDGE_PARALLEL);
+      CommonSubdivisionPoint* pEnd = parallelSegment ? pts[i + 2] : pts[i + 1];
+
+      double t0 = tAlongA(pStart);
+      double t1 = tAlongA(pEnd);
+      bool last = parallelSegment ? (i + 3 == pts.size()) : (i + 2 == pts.size());
+      if (tA > t1 && !last) continue;
+
+      // Local parameter within this segment
+      double s = (t1 > t0) ? clamp((tA - t0) / (t1 - t0), 0., 1.) : 0.;
+
+      if (parallelSegment) {
+        // The segment runs along an intrinsic edge
+        Edge eB = pts[i + 1]->posB.edge;
+        double sB0 = (pStart->posB.vertex == src(eB)) ? 0. : 1.;
+        double sB1 = (pEnd->posB.vertex == src(eB)) ? 0. : 1.;
+        return SurfacePoint(eB, (1. - s) * sB0 + s * sB1);
+      } else {
+        // The segment passes through a single intrinsic face
+        Face fB = sharedFace(pStart->posB, pEnd->posB);
+        GC_SAFETY_ASSERT(fB != Face(), "consecutive crossings along an input edge must share an intrinsic face");
+        Vector3 b0 = pStart->posB.inFace(fB).faceCoords;
+        Vector3 b1 = pEnd->posB.inFace(fB).faceCoords;
+        return SurfacePoint(fB, (1. - s) * b0 + s * b1);
+      }
+    }
+    throw std::runtime_error("equivalentPointOnIntrinsic: failed to locate edge point. This should not happen.");
+  }
+  case SurfacePointType::Face: {
+    Face fA = pointOnInput.face;
+    Vector3 q = pointOnInput.faceCoords;
+
+    CommonSubdivision& cs = getCommonSubdivision();
+    cs.constructMesh(true, true); // triangulated; no-op if already constructed
+
+    // Find the common subdivision triangle inside fA containing the query
+    // point: express q as barycentric combination of each candidate
+    // triangle's corners (in fA's coordinates) and pick the triangle for
+    // which the combination is closest to nonnegative.
+    Face bestFace;
+    Vector3 bestLambda;
+    double bestScore = -std::numeric_limits<double>::infinity();
+    for (Face fS : cs.mesh->faces()) {
+      if (cs.sourceFaceA[fS] != fA) continue;
+
+      std::array<Vector3, 3> corners;
+      size_t iC = 0;
+      for (Vertex vS : fS.adjacentVertices()) {
+        corners[iC++] = cs.sourcePoints[vS]->posA.inFace(fA).faceCoords;
+      }
+
+      // Solve sum_i lambda_i * corners[i] = q (3x3 linear system; the
+      // lambdas automatically sum to 1 since all columns and q do)
+      Eigen::Matrix3d A;
+      Eigen::Vector3d rhs;
+      for (size_t iR = 0; iR < 3; iR++) {
+        A(iR, 0) = corners[0][iR];
+        A(iR, 1) = corners[1][iR];
+        A(iR, 2) = corners[2][iR];
+        rhs(iR) = q[iR];
+      }
+      Eigen::Vector3d lambda = A.colPivHouseholderQr().solve(rhs);
+
+      double score = std::min(lambda(0), std::min(lambda(1), lambda(2)));
+      if (score > bestScore) {
+        bestScore = score;
+        bestFace = fS;
+        bestLambda = Vector3{lambda(0), lambda(1), lambda(2)};
+      }
+    }
+    GC_SAFETY_ASSERT(bestFace != Face(), "query face has no faces in the common subdivision?!");
+
+    // Apply the barycentric combination to the corners' intrinsic positions
+    Face fB = cs.sourceFaceB[bestFace];
+    Vector3 result = Vector3::zero();
+    size_t iC = 0;
+    for (Vertex vS : bestFace.adjacentVertices()) {
+      result += bestLambda[iC++] * cs.sourcePoints[vS]->posB.inFace(fB).faceCoords;
+    }
+
+    // Clamp away small negative values from floating point
+    result.x = clamp(result.x, 0., 1.);
+    result.y = clamp(result.y, 0., 1.);
+    result.z = clamp(result.z, 0., 1.);
+    result /= (result.x + result.y + result.z);
+
+    return SurfacePoint(fB, result);
+  }
+  }
+  return SurfacePoint(); // unreachable
 }
 
 SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnInput(const SurfacePoint& pointOnIntrinsic) {
