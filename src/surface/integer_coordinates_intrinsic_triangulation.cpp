@@ -1589,6 +1589,54 @@ Halfedge IntegerCoordinatesIntrinsicTriangulation::splitInteriorEdge(Halfedge he
   }
 }
 
+Edge IntegerCoordinatesIntrinsicTriangulation::bestFlippableEdgeAround(Vertex v) {
+  // Find the highest priority edge to flip
+  Edge bestFlipEdge;
+  double bestFlipScore = -std::numeric_limits<double>::infinity();
+  bool bestFlipIsLoop = false;
+  for (Edge e : v.adjacentEdges()) {
+
+    if (isFixed(e)) continue; // can never flip fixed/boundary edges
+
+    double flipScore = checkFlip(e);
+    bool isLoop = e.firstVertex() == e.secondVertex();
+
+    // This logic picks the most-preferred edge to flip. The policy is
+    // basically "pick the edge whith the highest flipScore", except
+    // that we prefer loop edges if there are any.
+    if (isLoop) {
+      if (bestFlipIsLoop) {
+        // if the one we currently have is a loop, only take this
+        // one if it is better
+        if (flipScore > bestFlipScore) {
+          bestFlipScore = flipScore;
+          bestFlipEdge = e;
+        }
+
+      } else {
+        // if the one we currently have is not a loop, always take
+        // this one if it is valid
+        if (flipScore > 0.) {
+          bestFlipScore = flipScore;
+          bestFlipEdge = e;
+        }
+      }
+
+      bestFlipIsLoop = true;
+    } else {
+      if (!bestFlipIsLoop) { // only overwrite if the best is not a
+                             // loop
+        if (flipScore > bestFlipScore) {
+          bestFlipScore = flipScore;
+          bestFlipEdge = e;
+          bestFlipIsLoop = false;
+        }
+      }
+    }
+  }
+  return bestFlipEdge;
+}
+
 Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
   // Stolen from geometrycentral/signpost_intrinsic_triangulation.cpp
   // Strategy: flip edges until the vertex has degree three, then remove by
@@ -1603,76 +1651,28 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
 
   if (vertexLocations[v].type == SurfacePointType::Vertex) return Face(); // can't remove original vertices
 
-  if (isOnFixedEdge(v)) {
-    return Face(); // don't try to remove boundary vertices, for now at
-                   // least
+  // Removing a vertex on a marked edge would destroy the marked-edge
+  // constraint, so we refuse
+  if (markedEdges.size() > 0) {
+    for (Edge e : v.adjacentEdges()) {
+      if (markedEdges[e]) return Face();
+    }
   }
 
   if (v.isBoundary()) {
-    throw std::runtime_error("boundary vertex removal not implemented");
+    return removeInsertedBoundaryVertex(v);
   }
 
   // === Flip edges until v has degree 3
 
-
   size_t iterCount = 0;
   while (v.degree() != 3 && iterCount < 10 * v.degree()) {
-
-    // Find the highest priority edge to flip
-    Edge bestFlipEdge;
-    double bestFlipScore = -std::numeric_limits<double>::infinity();
-    bool bestFlipIsLoop = false;
-    for (Edge e : v.adjacentEdges()) {
-
-      double flipScore = checkFlip(e);
-      bool isLoop = e.firstVertex() == e.secondVertex();
-
-      // This logic picks the most-preferred edge to flip. The policy is
-      // basically "pick the edge whith the highest flipScore", except
-      // that we prefer loop edges if there are any.
-      if (isLoop) {
-        if (bestFlipIsLoop) {
-          // if the one we currently have is a loop, only take this
-          // one if it is better
-          if (flipScore > bestFlipScore) {
-            bestFlipScore = flipScore;
-            bestFlipEdge = e;
-          }
-
-        } else {
-          // if the one we currently have is not a loop, always take
-          // this one if it is valid
-          if (flipScore > 0.) {
-            bestFlipScore = flipScore;
-            bestFlipEdge = e;
-          }
-        }
-
-        bestFlipIsLoop = true;
-      } else {
-        if (!bestFlipIsLoop) { // only overwrite if the best is not a
-                               // loop
-          if (flipScore > bestFlipScore) {
-            bestFlipScore = flipScore;
-            bestFlipEdge = e;
-            bestFlipIsLoop = false;
-          }
-        }
-      }
-    }
+    Edge bestFlipEdge = bestFlippableEdgeAround(v);
 
     if (bestFlipEdge == Edge()) {
       return Face();
-      // throw std::runtime_error("failed to remove vertex " +
-      //                             std::to_string(v) +
-      //                             ".  Could not find any edge to
-      //                             flip");
     }
 
-    // Passing -inf as the tolerance forces us to always do the flip, since
-    // we've already verified it above
-    // flipEdgeIfPossible(bestFlipEdge,
-    //                    -std::numeric_limits<double>::infinity());
     flipEdgeIfPossible(bestFlipEdge);
 
     iterCount++;
@@ -1680,10 +1680,6 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
 
   // give up if something went wrong (eg. flipped edges)
   if (v.degree() != 3) {
-    // throw std::runtime_error(
-    //     "failed to remove vertex " + std::to_string(v) +
-    //     ".  Somehow vertex degree is not 3. Was it 2 beforehand? (which "
-    //     "can only be degenerate)");
     return Face();
   }
 
@@ -1692,6 +1688,78 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
 
   // ==== Update cached data
   // Edge lengths, normal coordinates, and roundabouts should be okay
+  updateFaceBasis(newF);
+  for (Halfedge he : newF.adjacentHalfedges()) {
+    updateHalfedgeVectorsInVertex(he.vertex());
+  }
+
+  triangulationChanged();
+
+  return newF;
+}
+
+Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedBoundaryVertex(Vertex v) {
+  // v was inserted by splitting a boundary edge, so it lies in the interior
+  // of an input boundary edge, its two boundary edges run collinearly along
+  // that input edge, and its angle sum is exactly pi. Hence deleting it (by
+  // merging its two boundary edges) leaves the metric unchanged.
+  GC_SAFETY_ASSERT(vertexLocations[v].type == SurfacePointType::Edge,
+                   "an inserted boundary vertex must lie on an input edge");
+
+  // === Flip interior edges incident on v until only one remains
+  // (degree 3 = two boundary edges + one interior edge)
+  size_t iterCount = 0;
+  while (v.degree() != 3 && iterCount < 10 * v.degree()) {
+    Edge bestFlipEdge = bestFlippableEdgeAround(v);
+
+    if (bestFlipEdge == Edge()) {
+      return Face();
+    }
+
+    flipEdgeIfPossible(bestFlipEdge);
+
+    iterCount++;
+  }
+
+  if (v.degree() != 3) {
+    return Face(); // give up
+  }
+
+  // === Identify the local configuration: boundary neighbors a, b with
+  // boundary halfedges a->v (heAV) and v->b (heVB)
+  Halfedge heVB, heExtVA;
+  for (Halfedge he : v.outgoingHalfedges()) {
+    if (he.isInterior() && he.edge().isBoundary()) heVB = he;
+    if (!he.isInterior()) heExtVA = he;
+  }
+  GC_SAFETY_ASSERT(heVB != Halfedge() && heExtVA != Halfedge(), "boundary vertex must have boundary halfedges");
+  Halfedge heAV = heExtVA.twin();
+
+  // The edge a-v survives the collapse below (spanning a-b afterwards);
+  // the edges v-b and v-k are deleted
+  Edge survivingEdge = heAV.edge();
+  double newLength = edgeLengths[heAV.edge()] + edgeLengths[heVB.edge()];
+
+  GC_SAFETY_ASSERT(normalCoordinates[heAV.edge()] < 0 && normalCoordinates[heVB.edge()] < 0,
+                   "boundary edges must run along input boundary edges");
+
+  // === Remove the vertex by collapsing the boundary edge v-b
+  // (this deletes v, reconnects the surviving edge a-v as a-b, and merges
+  // the two incident triangles)
+  Vertex vKept = intrinsicMesh->collapseEdgeTriangular(heVB.edge());
+  if (vKept == Vertex()) {
+    return Face(); // mesh op refused (e.g. pinch configuration)
+  }
+
+  // === Update cached data
+  // a-v and v-b were collinear pieces of the same input edge
+  edgeLengths[survivingEdge] = newLength;
+  // The normal coordinate of survivingEdge is unchanged (still runs along
+  // the same input edge). The exterior halfedge formerly leaving v now
+  // leaves b; refresh its roundabout.
+  normalCoordinates.setRoundaboutFromPrevRoundabout(heExtVA);
+
+  Face newF = survivingEdge.halfedge().face();
   updateFaceBasis(newF);
   for (Halfedge he : newF.adjacentHalfedges()) {
     updateHalfedgeVectorsInVertex(he.vertex());
