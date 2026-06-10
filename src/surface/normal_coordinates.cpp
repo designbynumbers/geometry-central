@@ -204,19 +204,22 @@ std::array<int, 4> NormalCoordinates::computeInteriorEdgeSplitDataGeodesic(Intri
     Corner ck = e.halfedge().next().next().corner();
     Corner cl = e.halfedge().twin().next().next().corner();
 
+    // (cast the size_t corner quantities to int before doing arithmetic;
+    // otherwise the subtractions below wrap around when the corner
+    // coordinate is smaller than the crossing count)
     int n1 = 0;
-    n1 += positivePart(strictCornerCoord(e.halfedge().twin().corner()) - positivePart(n2));
-    n1 += positivePart(strictCornerCoord(e.halfedge().twin().next().corner()) - positivePart(n4));
-    n1 += strictCornerCoord(cl);
-    n1 += strictDegree(e.halfedge().twin().corner());
-    n1 += strictDegree(e.halfedge().twin().next().corner());
+    n1 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().twin().corner())) - positivePart(n2));
+    n1 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().twin().next().corner())) - positivePart(n4));
+    n1 += static_cast<int>(strictCornerCoord(cl));
+    n1 += static_cast<int>(strictDegree(e.halfedge().twin().corner()));
+    n1 += static_cast<int>(strictDegree(e.halfedge().twin().next().corner()));
 
     int n3 = 0;
-    n3 += positivePart(strictCornerCoord(e.halfedge().next().corner()) - positivePart(n2));
-    n3 += positivePart(strictCornerCoord(e.halfedge().corner()) - positivePart(n4));
-    n3 += strictCornerCoord(ck);
-    n3 += strictDegree(e.halfedge().corner());
-    n3 += strictDegree(e.halfedge().next().corner());
+    n3 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().next().corner())) - positivePart(n2));
+    n3 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().corner())) - positivePart(n4));
+    n3 += static_cast<int>(strictCornerCoord(ck));
+    n3 += static_cast<int>(strictDegree(e.halfedge().corner()));
+    n3 += static_cast<int>(strictDegree(e.halfedge().next().corner()));
 
     return {n1, n2, n3, n4};
   } else {
@@ -242,19 +245,22 @@ std::array<int, 4> NormalCoordinates::computeInteriorEdgeSplitDataCombinatorial(
     Corner ck = e.halfedge().next().next().corner();
     Corner cl = e.halfedge().twin().next().next().corner();
 
+    // (cast the size_t corner quantities to int before doing arithmetic;
+    // otherwise the subtractions below wrap around when the corner
+    // coordinate is smaller than the crossing count)
     int n1 = 0;
-    n1 += positivePart(strictCornerCoord(e.halfedge().twin().corner()) - positivePart(n2));
-    n1 += positivePart(strictCornerCoord(e.halfedge().twin().next().corner()) - positivePart(n4));
-    n1 += strictCornerCoord(cl);
-    n1 += strictDegree(e.halfedge().twin().corner());
-    n1 += strictDegree(e.halfedge().twin().next().corner());
+    n1 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().twin().corner())) - positivePart(n2));
+    n1 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().twin().next().corner())) - positivePart(n4));
+    n1 += static_cast<int>(strictCornerCoord(cl));
+    n1 += static_cast<int>(strictDegree(e.halfedge().twin().corner()));
+    n1 += static_cast<int>(strictDegree(e.halfedge().twin().next().corner()));
 
     int n3 = 0;
-    n3 += positivePart(strictCornerCoord(e.halfedge().next().corner()) - positivePart(n2));
-    n3 += positivePart(strictCornerCoord(e.halfedge().corner()) - positivePart(n4));
-    n3 += strictCornerCoord(ck);
-    n3 += strictDegree(e.halfedge().corner());
-    n3 += strictDegree(e.halfedge().next().corner());
+    n3 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().next().corner())) - positivePart(n2));
+    n3 += positivePart(static_cast<int>(strictCornerCoord(e.halfedge().corner())) - positivePart(n4));
+    n3 += static_cast<int>(strictCornerCoord(ck));
+    n3 += static_cast<int>(strictDegree(e.halfedge().corner()));
+    n3 += static_cast<int>(strictDegree(e.halfedge().next().corner()));
 
     return {n1, n2, n3, n4};
   } else {
@@ -309,12 +315,15 @@ std::array<int, 3> NormalCoordinates::computeBoundaryEdgeSplitDataGeodesic(Intri
 
     Corner ck = heI.next().next().corner();
 
+    // (cast the size_t corner quantities to int before doing arithmetic;
+    // otherwise the subtractions below wrap around when the corner
+    // coordinate is smaller than the crossing count)
     int n3 = 0;
-    n3 += positivePart(strictCornerCoord(heI.next().corner()) - positivePart(n2));
-    n3 += positivePart(strictCornerCoord(heI.corner()) - positivePart(n4));
-    n3 += strictCornerCoord(ck);
-    n3 += strictDegree(heI.corner());
-    n3 += strictDegree(heI.next().corner());
+    n3 += positivePart(static_cast<int>(strictCornerCoord(heI.next().corner())) - positivePart(n2));
+    n3 += positivePart(static_cast<int>(strictCornerCoord(heI.corner())) - positivePart(n4));
+    n3 += static_cast<int>(strictCornerCoord(ck));
+    n3 += static_cast<int>(strictDegree(heI.corner()));
+    n3 += static_cast<int>(strictDegree(heI.next().corner()));
 
     return {n2, n3, n4};
   } else {
@@ -826,7 +835,11 @@ size_t strictDegree(int nij, int njk, int nki) {
 // Counts the number of arcs clipping off corner k. If arcs leave corner k, then
 // they get counted as -1/2 each
 int cornerCoord(int nij, int njk, int nki) {
-  return (njk + nki - nij - strictDegree(njk, nki, nij) - strictDegree(nki, nij, njk)) / 2;
+  // (cast the size_t strictDegree to int; otherwise the subtraction is done
+  // in unsigned arithmetic and wraps around when the result is negative)
+  return (njk + nki - nij - static_cast<int>(strictDegree(njk, nki, nij)) -
+          static_cast<int>(strictDegree(nki, nij, njk))) /
+         2;
 }
 
 // Counts the number of arcs clipping off corner k, returns 0 if arcs leave
