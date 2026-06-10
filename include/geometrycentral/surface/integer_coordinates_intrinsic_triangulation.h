@@ -152,6 +152,16 @@ private:
 
   // Construct the common subdivision for the current triangulation.
   void constructCommonSubdivision() override;
+
+  // Find the most-preferred flippable edge incident on v (highest checkFlip
+  // score, preferring loop edges, skipping fixed edges). Returns Edge() if
+  // no incident edge can be flipped.
+  Edge bestFlippableEdgeAround(Vertex v);
+
+  // Remove an inserted vertex lying on the boundary (i.e. a vertex created
+  // by splitting a boundary edge). Returns the new face, or Face() if the
+  // vertex could not be removed.
+  Face removeInsertedBoundaryVertex(Vertex v);
 };
 
 FaceData<Vector2> interpolateTangentVectorsB(const IntegerCoordinatesIntrinsicTriangulation& tri,
