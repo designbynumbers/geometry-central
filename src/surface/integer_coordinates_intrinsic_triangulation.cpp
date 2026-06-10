@@ -279,6 +279,15 @@ void IntegerCoordinatesIntrinsicTriangulation::constructCommonSubdivision() {
         std::vector<std::pair<SurfacePoint, double>> geodesicPath =
             generateFullSingleGeodesicGeometry(*intrinsicMesh, *this, curve);
 
+        // The geodesic t-values are parameterized along this component, which
+        // may span only part of eA (if it begins or ends at inserted vertices
+        // lying on eA); rescale to eA's parameterization.
+        Halfedge heInput;
+        double tRange0, tRange1;
+        std::tie(heInput, tRange0, tRange1) = identifyInputCurveRange(curve);
+        GC_SAFETY_ASSERT(heInput.edge() == eA, "traced curve component must lie along the input edge being traced");
+        bool inputForward = heInput == eA.halfedge();
+
         if (first) cs.pointsAlongA[eA].push_back(aVtx[src(eA)]);
 
         Halfedge hB;
@@ -290,7 +299,8 @@ void IntegerCoordinatesIntrinsicTriangulation::constructCommonSubdivision() {
           // geodesicPath stores the start and end point, which
           // path doesn't do, so we offset by 1 here
           SurfacePoint ptB = std::get<0>(geodesicPath[iC + 1]);
-          double tA = std::get<1>(geodesicPath[iC + 1]);
+          double tA = tRange0 + std::get<1>(geodesicPath[iC + 1]) * (tRange1 - tRange0);
+          if (!inputForward) tA = 1. - tA;
 
           int iB = std::get<0>(path[iC]);
           if (!positiveOrientation) iB = positivePart(normalCoordinates[eB]) - iB - 1;
@@ -766,8 +776,11 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
         return {heBary(he, 1), vertexLocations[he.next().vertex()]};
       } else {
         // intermediate crossing
-        double tInput = transverseCrossingTimes[heIndex(he)][pos - 1];
-        Halfedge heInput = identifyInputEdge(curves[heIndex(he)][pos - 1]);
+        Halfedge heInput;
+        double tRange0, tRange1;
+        std::tie(heInput, tRange0, tRange1) = identifyInputCurveRange(curves[heIndex(he)][pos - 1]);
+        double tCurve = transverseCrossingTimes[heIndex(he)][pos - 1];
+        double tInput = tRange0 + tCurve * (tRange1 - tRange0);
         double tIntrinsic = boundaryCrossings[heIndex(he)][pos - 1];
         return {heBary(he, tIntrinsic), SurfacePoint(heInput, tInput)};
       }
@@ -817,7 +830,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
       // Identify halfedge in input mesh
       // TODO: repeated effort in computeIntrinsicAndInputPoints
       // Have to take twin due to weird orientation conventions
-      Halfedge inputHalfedge = identifyInputEdge(inputHedgeCurve).twin();
+      Halfedge inputHalfedge = std::get<0>(identifyInputCurveRange(inputHedgeCurve)).twin();
 
       if (justPast) { // flip orientation
         inputHalfedge = inputHalfedge.twin();
@@ -899,7 +912,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
       auto& inputHedgeCurve = curves[heIndex(firstHedge)][0];
 
       // Identify halfedge in input mesh
-      Halfedge inputHalfedge = identifyInputEdge(inputHedgeCurve).twin();
+      Halfedge inputHalfedge = std::get<0>(identifyInputCurveRange(inputHedgeCurve)).twin();
 
       inputFace = inputHalfedge.face();
 
@@ -926,7 +939,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
       auto& inputHedgeCurve = curves[heIndex(firstHedge)][inputPointIndex];
 
       // Identify halfedge in input mesh
-      Halfedge inputHalfedge = identifyInputEdge(inputHedgeCurve);
+      Halfedge inputHalfedge = std::get<0>(identifyInputCurveRange(inputHedgeCurve));
       inputFace = inputHalfedge.face();
 
       intrinsicInputPairs.push_back(computeIntrinsicAndInputPoints(firstHedge, inputPointIndex + 1));
@@ -1090,8 +1103,11 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
       segmentTail = vertexLocations[he.tailVertex()];
       tSegmentTail = 0;
     } else {
-      Halfedge tailHedge = identifyInputEdge(curves[crossingSegment - 1]);
-      segmentTail = SurfacePoint(tailHedge, transverseCrossingTimes[crossingSegment - 1]);
+      Halfedge tailHedge;
+      double tRange0, tRange1;
+      std::tie(tailHedge, tRange0, tRange1) = identifyInputCurveRange(curves[crossingSegment - 1]);
+      double tCurve = transverseCrossingTimes[crossingSegment - 1];
+      segmentTail = SurfacePoint(tailHedge, tRange0 + tCurve * (tRange1 - tRange0));
       tSegmentTail = heCrossingTimes[crossingSegment - 1];
     }
 
@@ -1099,8 +1115,11 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
       segmentTip = vertexLocations[he.tipVertex()];
       tSegmentTip = 1;
     } else {
-      Halfedge tipHedge = identifyInputEdge(curves[crossingSegment]);
-      segmentTip = SurfacePoint(tipHedge, transverseCrossingTimes[crossingSegment]);
+      Halfedge tipHedge;
+      double tRange0, tRange1;
+      std::tie(tipHedge, tRange0, tRange1) = identifyInputCurveRange(curves[crossingSegment]);
+      double tCurve = transverseCrossingTimes[crossingSegment];
+      segmentTip = SurfacePoint(tipHedge, tRange0 + tCurve * (tRange1 - tRange0));
       tSegmentTip = heCrossingTimes[crossingSegment];
     }
 
@@ -1954,6 +1973,67 @@ Halfedge IntegerCoordinatesIntrinsicTriangulation::identifyInputEdge(const Norma
     int rIdx = p + normalCoordinates.roundabouts[hePrev] - negativePart(normalCoordinates[hePrev.edge()]);
 
     return vertexHalfedge(inputSrc, rIdx);
+  }
+}
+
+std::tuple<Halfedge, double, double>
+IntegerCoordinatesIntrinsicTriangulation::identifyInputCurveRange(const NormalCoordinatesCurve& path) const {
+  GC_SAFETY_ASSERT(!path.crossings.empty() && path.crossings[0].first >= 0,
+                   "identifyInputCurveRange requires a transverse curve component");
+
+  // Endpoints of the component in the intrinsic mesh
+  Halfedge heFirst = path.crossings.front().second;
+  Vertex vStart = heFirst.next().next().vertex();
+  Halfedge heLast = path.crossings.back().second;
+  Vertex vEnd = heLast.twin().next().tipVertex();
+
+  SurfacePoint locStart = vertexLocations[vStart];
+  SurfacePoint locEnd = vertexLocations[vEnd];
+
+  // Map an edge point's tEdge to the parameterization along inputHe
+  auto tAlong = [](Halfedge inputHe, double tEdge) -> double {
+    return (inputHe == inputHe.edge().halfedge()) ? tEdge : 1. - tEdge;
+  };
+
+  if (locStart.type == SurfacePointType::Vertex) {
+    // Component starts at an original vertex: the roundabout-based
+    // identification applies, and the component covers the input edge from
+    // its start
+    Halfedge inputHe = identifyInputEdge(path);
+    double tEnd = 1;
+    if (locEnd.type == SurfacePointType::Edge) {
+      GC_SAFETY_ASSERT(locEnd.edge == inputHe.edge(), "curve component must end on the input edge it runs along");
+      tEnd = tAlong(inputHe, locEnd.tEdge);
+    }
+    return std::make_tuple(inputHe, 0., tEnd);
+  } else if (locStart.type == SurfacePointType::Edge) {
+    // Component starts at an inserted vertex lying on the input edge
+    Edge inputEdge = locStart.edge;
+
+    Halfedge inputHe;
+    if (locEnd.type == SurfacePointType::Vertex) {
+      // Determine direction from the endpoint vertex
+      Vertex vB = locEnd.vertex;
+      Halfedge he0 = inputEdge.halfedge();
+      GC_SAFETY_ASSERT(he0.tipVertex() == vB || he0.tailVertex() == vB,
+                       "curve component must end at an endpoint of the input edge it runs along");
+      // (on a self-edge of the input mesh this choice is ambiguous; we pick
+      // the forward halfedge)
+      inputHe = (he0.tipVertex() == vB) ? he0 : he0.twin();
+    } else if (locEnd.type == SurfacePointType::Edge) {
+      // Both endpoints are inserted vertices on the same input edge;
+      // determine direction by comparing positions along the edge
+      GC_SAFETY_ASSERT(locEnd.edge == inputEdge, "curve component endpoints must lie on a common input edge");
+      inputHe = (locEnd.tEdge >= locStart.tEdge) ? inputEdge.halfedge() : inputEdge.halfedge().twin();
+    } else {
+      throw std::runtime_error("curve component ends at a face point; this should be impossible");
+    }
+
+    double tStart = tAlong(inputHe, locStart.tEdge);
+    double tEnd = (locEnd.type == SurfacePointType::Edge) ? tAlong(inputHe, locEnd.tEdge) : 1.;
+    return std::make_tuple(inputHe, tStart, tEnd);
+  } else {
+    throw std::runtime_error("curve component starts at a face point; this should be impossible");
   }
 }
 
