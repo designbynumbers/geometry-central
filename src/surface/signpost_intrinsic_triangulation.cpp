@@ -424,6 +424,64 @@ Halfedge SignpostIntrinsicTriangulation::insertVertex_edge(SurfacePoint newP) {
   Face fB = insertionEdge.halfedge().twin().face();
   bool isOnBoundary = fB.isBoundaryLoop();
 
+  // === (1b) Check whether this edge runs along an edge of the input mesh.
+  // If so, the new vertex's location on the input mesh is known exactly by
+  // interpolation, and we use it below in place of the traced location:
+  // tracing resolves the location only approximately, and can produce a
+  // face point lying epsilon-close to (or on the wrong side of) the input
+  // edge, which breaks downstream consumers like the common subdivision.
+  Edge inputEdgeAlong;
+  double tSplitOnInput = -1;
+  double tTailAlong = -1, tTipAlong = -1;
+  if (!isOnBoundary) { // (the boundary case is already handled exactly, in resolveNewVertex)
+    SurfacePoint locTail = vertexLocations[insertionEdge.halfedge().tailVertex()];
+    SurfacePoint locTip = vertexLocations[insertionEdge.halfedge().tipVertex()];
+
+    // Identify a candidate input edge which this edge might run along
+    Edge candEdge;
+    if (edgeIsOriginal[insertionEdge]) {
+      // original edges have the same index in the input mesh
+      candEdge = inputMesh.edge(insertionEdge.getIndex());
+    } else if (locTail.type == SurfacePointType::Edge) {
+      // pieces of previously-split edges along the input edge
+      candEdge = locTail.edge;
+    } else if (locTip.type == SurfacePointType::Edge) {
+      candEdge = locTip.edge;
+    }
+
+    // An endpoint lies on candEdge if it is one of its endpoints or an edge
+    // point along it
+    auto onCandEdge = [&](const SurfacePoint& loc) -> bool {
+      switch (loc.type) {
+      case SurfacePointType::Vertex:
+        return loc.vertex == candEdge.halfedge().tailVertex() || loc.vertex == candEdge.halfedge().tipVertex();
+      case SurfacePointType::Edge:
+        return loc.edge == candEdge;
+      default:
+        return false;
+      }
+    };
+
+    if (candEdge != Edge() && onCandEdge(locTail) && onCandEdge(locTip)) {
+      double tTail = locTail.inEdge(candEdge).tEdge;
+      double tTip = locTip.inEdge(candEdge).tEdge;
+
+      // Verify that the intrinsic edge length matches the length of the
+      // corresponding piece of the input edge, so that the edge really runs
+      // along it (rather than being some other geodesic between the same
+      // two points)
+      inputGeom.requireEdgeLengths();
+      double lenAlong = std::abs(tTip - tTail) * inputGeom.edgeLengths[candEdge];
+      double lenIntrinsic = edgeLengths[insertionEdge];
+      if (std::abs(lenAlong - lenIntrinsic) <= 1e-9 * (lenAlong + lenIntrinsic)) {
+        inputEdgeAlong = candEdge;
+        tSplitOnInput = (1. - newP.tEdge) * tTail + newP.tEdge * tTip;
+        tTailAlong = tTail;
+        tTipAlong = tTip;
+      }
+    }
+  }
+
   // Find coordinates in (both) faces and compute the lengths of the new wedges
   double backLen, frontLen, Alen, Blen;
 
@@ -475,7 +533,10 @@ Halfedge SignpostIntrinsicTriangulation::insertVertex_edge(SurfacePoint newP) {
   }
 
   // === (4) Now that we have edge lengths, sort out tangent spaces and position on supporting.
-  resolveNewVertex(newV, newP);
+  // (forwardHe is the new intrinsic halfedge pointing along inputEdgeAlong
+  // in its direction of increasing tEdge, if applicable)
+  Halfedge forwardHe = (tTipAlong >= tTailAlong) ? newHeFront : newHeBack;
+  resolveNewVertex(newV, newP, inputEdgeAlong, tSplitOnInput, forwardHe);
 
   triangulationChanged();
   invokeEdgeSplitCallbacks(insertionEdge, newHeFront, newHeBack);
@@ -625,7 +686,8 @@ void SignpostIntrinsicTriangulation::updateAngleFromCWNeighor(Halfedge he) {
 }
 
 
-void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint intrinsicPoint) {
+void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint intrinsicPoint, Edge inputEdgeAlong,
+                                                      double tAlong, Halfedge forwardHe) {
 
   // == (1) Compute angular coordinates for the halfedges
   // Now that we have valid edge lengths, compute halfedge angular coordinates for our new vertex
@@ -655,7 +717,7 @@ void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint 
 
     // type score
     int numScore = 2;
-    SurfacePoint candidateLoc = vertexLocations[inputTraceHe.vertex()];
+    SurfacePoint candidateLoc = vertexLocations[heIn.vertex()];
     if (candidateLoc.type == SurfacePointType::Vertex) {
       numScore = 1;
     }
@@ -723,6 +785,16 @@ void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint 
     double thisT = (1. - localT) * tPrev + (localT)*tNext;
 
     newPositionOnInput = SurfacePoint(origEdge, thisT);
+  } else if (inputEdgeAlong != Edge()) {
+    // The vertex was inserted on an interior intrinsic edge which runs
+    // along an input edge: its location is known exactly, and the tangent
+    // space can be aligned directly. At an edge point of the input mesh,
+    // the tangent frame's +x direction points along the edge, so the
+    // intrinsic halfedge pointing along the edge in its forward direction
+    // gets angle 0 (mirroring the boundary case above).
+    inputTraceHe = forwardHe.twin();
+    newPositionOnInput = SurfacePoint(inputEdgeAlong, tAlong);
+    outgoingVec = Vector2::fromAngle(0.);
   } else {
     // Normal case: trace an edge inward, use the result to resolve position and tangent basis
     // std::cout << "tracing to resolve new vertex" << std::endl;
@@ -731,9 +803,46 @@ void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint 
     TraceGeodesicResult inputTraceResult =
         traceGeodesic(inputGeom, vertexLocations[inputTraceHe.vertex()], halfedgeVector(inputTraceHe), options);
     // std::cout << " --> done tracing to resolve new vertex" << std::endl;
-    // snapEndToEdgeIfClose(inputTraceResult); TODO
     newPositionOnInput = inputTraceResult.endPoint;
     outgoingVec = -inputTraceResult.endingDir;
+
+    // If the traced point is a face point lying numerically on an edge of
+    // the face, snap it to a point on that edge. Recording it as a face
+    // point would pick an arbitrary one of the two adjacent faces (possibly
+    // the "wrong" side of the edge), which breaks downstream consumers like
+    // common subdivision construction. The direction is carried along: at a
+    // face point it is expressed in the face's frame, at an edge point in
+    // the frame whose +x direction points along edge.halfedge().
+    if (newPositionOnInput.type == SurfacePointType::Face) {
+      const double snapEPS = 1e-10;
+      Vector3 b = newPositionOnInput.faceCoords;
+      int nZero = 0, iZero = -1;
+      for (int i = 0; i < 3; i++) {
+        if (std::abs(b[i]) < snapEPS) {
+          nZero++;
+          iZero = i;
+        }
+      }
+      if (nZero == 1) {
+        Face f = newPositionOnInput.face;
+        // the point lies on the edge connecting the other two vertices,
+        // i.e. along the halfedge starting at vertex (iZero+1)%3
+        Halfedge heOn = f.halfedge();
+        for (int i = 0; i < (iZero + 1) % 3; i++) heOn = heOn.next();
+        double tHe = b[(iZero + 2) % 3] / (b[(iZero + 1) % 3] + b[(iZero + 2) % 3]);
+
+        Vector2 heDirInFace = inputGeom.halfedgeVectorsInFace[heOn].normalize();
+        Vector2 vecInHeFrame = outgoingVec / heDirInFace;
+
+        if (heOn == heOn.edge().halfedge()) {
+          newPositionOnInput = SurfacePoint(heOn.edge(), tHe);
+          outgoingVec = vecInHeFrame;
+        } else {
+          newPositionOnInput = SurfacePoint(heOn.edge(), 1. - tHe);
+          outgoingVec = -vecInHeFrame;
+        }
+      }
+    }
   }
 
   // Set the location of our newly inserted vertex
