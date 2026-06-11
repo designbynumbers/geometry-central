@@ -655,7 +655,7 @@ void SignpostIntrinsicTriangulation::resolveNewVertex(Vertex newV, SurfacePoint 
 
     // type score
     int numScore = 2;
-    SurfacePoint candidateLoc = vertexLocations[inputTraceHe.vertex()];
+    SurfacePoint candidateLoc = vertexLocations[heIn.vertex()];
     if (candidateLoc.type == SurfacePointType::Vertex) {
       numScore = 1;
     }
