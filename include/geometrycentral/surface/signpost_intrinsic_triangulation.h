@@ -96,7 +96,14 @@ private:
   // Insertion helpers
   Vertex insertVertex_face(SurfacePoint newPositionOnIntrinsic);
   Halfedge insertVertex_edge(SurfacePoint newPositionOnIntrinsic);
-  void resolveNewVertex(Vertex newV, SurfacePoint intrinsicPoint);
+  // Resolve the location of a new vertex on the input mesh, and align its
+  // tangent space. If the vertex was inserted on an (interior) intrinsic
+  // edge which runs along input edge `inputEdgeAlong`, its exact location
+  // (inputEdgeAlong, tAlong) is used rather than an approximate traced one;
+  // in that case `forwardHe` must be the intrinsic halfedge out of newV
+  // which points along the input edge in the direction of increasing tEdge.
+  void resolveNewVertex(Vertex newV, SurfacePoint intrinsicPoint, Edge inputEdgeAlong = Edge(), double tAlong = -1.,
+                        Halfedge forwardHe = Halfedge());
 
   // Update a signpost angle from the (counter-)clockwise neighboring angle
   void updateAngleFromCWNeighor(Halfedge he);
