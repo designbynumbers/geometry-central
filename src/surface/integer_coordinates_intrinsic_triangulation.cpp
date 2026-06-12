@@ -1,6 +1,7 @@
 #include "geometrycentral/surface/integer_coordinates_intrinsic_triangulation.h"
 
 #include <ctime>
+#include <unordered_set>
 
 namespace geometrycentral {
 namespace surface {
@@ -26,45 +27,6 @@ std::array<T, 3> rotate(const std::array<T, 3>& data) {
 }
 
 inline Vector3 rotate(const Vector3& v) { return {v.y, v.z, v.x}; }
-
-// If pt is a face point with barycentric component(s) numerically equal to
-// zero, reduce it to the equivalent point on the face's edge (one ~zero
-// component) or vertex (two ~zero components). Recording such a point as a
-// face point loses the incidence: consumers which dispatch on the location
-// type (curve tracing, identifyInputCurveRange, common subdivision
-// construction) treat face points as strictly interior.
-SurfacePoint reduceDegenerateFacePoint(const SurfacePoint& pt, double eps = 1e-12) {
-  if (pt.type != SurfacePointType::Face) return pt;
-  Vector3 b = pt.faceCoords;
-
-  int nZero = 0;
-  int iZero = -1;    // index of a ~zero component
-  int iNonzero = -1; // index of a non-~zero component
-  for (int i = 0; i < 3; i++) {
-    if (std::abs(b[i]) < eps) {
-      nZero++;
-      iZero = i;
-    } else {
-      iNonzero = i;
-    }
-  }
-
-  if (nZero == 1) {
-    // On the edge connecting vertices (iZero+1)%3 and (iZero+2)%3, i.e.
-    // along the halfedge starting at vertex (iZero+1)%3
-    Halfedge he = pt.face.halfedge();
-    for (int i = 0; i < (iZero + 1) % 3; i++) he = he.next();
-    double tHe = b[(iZero + 2) % 3] / (b[(iZero + 1) % 3] + b[(iZero + 2) % 3]);
-    return SurfacePoint(he, tHe);
-  }
-  if (nZero == 2) {
-    // At the remaining vertex
-    Halfedge he = pt.face.halfedge();
-    for (int i = 0; i < iNonzero; i++) he = he.next();
-    return SurfacePoint(he.vertex());
-  }
-  return pt;
-}
 
 } // namespace
 
@@ -756,7 +718,14 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertCircumcenterOrSplitSegmen
   }
 
   // === Phase 3: Add the new vertex
+  size_t nVBefore = intrinsicMesh->nVertices();
   Vertex newV = insertVertex(newPositionOnIntrinsic);
+  if (intrinsicMesh->nVertices() == nVBefore) {
+    // the insertion was refused (coincident with an existing vertex);
+    // report failure so refinement skips this face rather than retrying
+    // forever
+    return Vertex();
+  }
   return newV;
 }
 
@@ -843,7 +812,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
   } else if (normalCoordinates[f.halfedge().edge()] <= 0 && normalCoordinates[f.halfedge().next().edge()] <= 0 &&
              normalCoordinates[f.halfedge().next().next().edge()] <= 0) {
 
-    insertionFace = getParentFace(f);
+    insertionFace = inputFaceOfUncrossedRegion(f);
 
     std::array<Vector3, 3> vertexBary;
     size_t iV = 0;
@@ -1210,7 +1179,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
     insertionFace = inputFace;
   }
 
-  return {reduceDegenerateFacePoint(SurfacePoint(insertionFace, insertionBary)), counts};
+  return {SurfacePoint(insertionFace, insertionBary), counts};
 }
 
 std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::computeEdgeSplitData(Halfedge he,
@@ -1286,27 +1255,37 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
 
     double tBarySegment = (tBary - tSegmentTail) / (tSegmentTip - tSegmentTail);
 
-    // If the split lands (numerically) exactly on a crossing--e.g. splitting
-    // at a parameter read off from the common subdivision--the new point IS
-    // that crossing: return its location, which is already correctly typed
-    // as a point on the input edge it crosses, rather than reconstructing it
-    // as a face point with a degenerate (~zero) barycentric component.
-    const double segEPS = 1e-12;
-    if (tBarySegment <= segEPS && segmentTail.type == SurfacePointType::Edge) {
-      return std::make_pair(segmentTail, crossingSegment);
+    // The input face containing the segment is determined combinatorially
+    // by the bounding crossings' curves: the segment lies on the tip side
+    // of crossing (crossingSegment-1) and the tail side of crossing
+    // (crossingSegment) along he. The coordinates within the face are
+    // floats; the element is exact, and the split's classification
+    // (crossingSegment) commits the new vertex to this face's interior even
+    // if the coordinates land numerically on its boundary.
+    Face inputFace;
+    if (crossingSegment > 0) {
+      inputFace = inputFaceBesideCurve(curves[crossingSegment - 1], false);
+      if (crossingSegment < normalCoordinates[he.edge()]) {
+        GC_SAFETY_ASSERT(inputFace == inputFaceBesideCurve(curves[crossingSegment], true),
+                         "consecutive crossings must agree on the input face between them");
+      }
+    } else {
+      inputFace = inputFaceBesideCurve(curves[0], true);
     }
-    if (tBarySegment >= 1. - segEPS && segmentTip.type == SurfacePointType::Edge) {
-      return std::make_pair(segmentTip, crossingSegment);
-    }
+    GC_SAFETY_ASSERT(checkAdjacent(segmentTail, SurfacePoint(inputFace, Vector3::zero())) &&
+                         checkAdjacent(segmentTip, SurfacePoint(inputFace, Vector3::zero())),
+                     "segment endpoints must lie on the segment's input face");
 
-    Face inputFace = sharedFace(segmentTail, segmentTip);
     Vector3 segmentTailCoords = segmentTail.inFace(inputFace).faceCoords;
     Vector3 segmentTipCoords = segmentTip.inFace(inputFace).faceCoords;
+    Vector3 blendCoords = (1 - tBarySegment) * segmentTailCoords + tBarySegment * segmentTipCoords;
+    // value hygiene only (no element change): keep coordinates in range
+    blendCoords.x = clamp(blendCoords.x, 0., 1.);
+    blendCoords.y = clamp(blendCoords.y, 0., 1.);
+    blendCoords.z = clamp(blendCoords.z, 0., 1.);
+    blendCoords /= (blendCoords.x + blendCoords.y + blendCoords.z);
 
-    return std::make_pair(
-        reduceDegenerateFacePoint(
-            SurfacePoint(inputFace, (1 - tBarySegment) * segmentTailCoords + tBarySegment * segmentTipCoords)),
-        crossingSegment);
+    return std::make_pair(SurfacePoint(inputFace, blendCoords), crossingSegment);
 
   } else if (normalCoordinates[he.edge()] < 0) {
     // If this is a shared edge, return a point on the shared edge
@@ -1328,30 +1307,61 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
 
     return std::make_pair(SurfacePoint(inputEdge, (1 - tBary) * tTail + tBary * tTip), 0);
   } else {
-    // The normal coordinate must be 0, meaning both endpoints are contained in a common face of the input mesh
+    // The normal coordinate must be 0, meaning the edge's interior lies in a
+    // single face of the input mesh; derive that face combinatorially (the
+    // endpoints' SurfacePoints alone are ambiguous when both lie on input
+    // edges, e.g. for an uncrossed edge running near an input edge)
 
     SurfacePoint tail = vertexLocations[he.tailVertex()];
     SurfacePoint tip = vertexLocations[he.tipVertex()];
 
-    Face inputFace = sharedFace(tail, tip);
-    if (inputFace == Face()) {
-      std::cout << he << " | normal coord: " << normalCoordinates[he.edge()] << std::endl;
-      std::cout << "Time to figure out what's going on" << std::endl;
-      std::cout << "tail: " << tail << std::endl;
-      std::cout << "tip: " << tip << std::endl;
-    }
+    Face inputFace = inputFaceOfUncrossedEdge(he.edge());
     GC_SAFETY_ASSERT(inputFace != Face(), "edge split err. Couldn't find shared parent face");
+    GC_SAFETY_ASSERT(checkAdjacent(tail, SurfacePoint(inputFace, Vector3::zero())) &&
+                         checkAdjacent(tip, SurfacePoint(inputFace, Vector3::zero())),
+                     "uncrossed edge endpoints must lie on the containing input face");
     SurfacePoint tailInFace = tail.inFace(inputFace);
     SurfacePoint tipInFace = tip.inFace(inputFace);
 
     Vector3 tailCoords = tailInFace.faceCoords;
     Vector3 tipCoords = tipInFace.faceCoords;
 
-    return std::make_pair(SurfacePoint(inputFace, (1 - tBary) * tailCoords + tBary * tipCoords), 0);
+    Vector3 blendCoords = (1 - tBary) * tailCoords + tBary * tipCoords;
+    // value hygiene only (no element change): keep coordinates in range
+    blendCoords.x = clamp(blendCoords.x, 0., 1.);
+    blendCoords.y = clamp(blendCoords.y, 0., 1.);
+    blendCoords.z = clamp(blendCoords.z, 0., 1.);
+    blendCoords /= (blendCoords.x + blendCoords.y + blendCoords.z);
+
+    return std::make_pair(SurfacePoint(inputFace, blendCoords), 0);
   }
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertex(SurfacePoint pt) {
+  // Refuse insertions coincident with an existing vertex (return that
+  // vertex instead): near-coincident vertices create near-zero-length
+  // intrinsic edges whose degenerate geometry poisons later floating point
+  // classifications. Note this refuses the *operation*; recorded data is
+  // never altered.
+  if (insertionCoincidenceEPS > 0) {
+    switch (pt.type) {
+    case SurfacePointType::Vertex:
+      break;
+    case SurfacePointType::Edge:
+      if (pt.tEdge <= insertionCoincidenceEPS) return pt.edge.halfedge().tailVertex();
+      if (pt.tEdge >= 1. - insertionCoincidenceEPS) return pt.edge.halfedge().tipVertex();
+      break;
+    case SurfacePointType::Face: {
+      size_t iV = 0;
+      for (Vertex v : pt.face.adjacentVertices()) {
+        if (pt.faceCoords[iV] >= 1. - insertionCoincidenceEPS) return v;
+        iV++;
+      }
+      break;
+    }
+    }
+  }
+
   Vertex newVertex;
   switch (pt.type) {
   case SurfacePointType::Vertex:
@@ -1811,6 +1821,149 @@ Edge IntegerCoordinatesIntrinsicTriangulation::bestFlippableEdgeAround(Vertex v)
     }
   }
   return bestFlipEdge;
+}
+
+Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertexAtCrossing(Halfedge he, int crossingIndex,
+                                                                        bool verbose) {
+  Edge e = he.edge();
+  GC_SAFETY_ASSERT(normalCoordinates[e] > 0, "insertVertexAtCrossing requires an edge with transverse crossings");
+  GC_SAFETY_ASSERT(crossingIndex >= 0 && crossingIndex < normalCoordinates[e], "crossing index out of range");
+  GC_SAFETY_ASSERT(!e.isBoundary(), "crossed edges cannot be boundary edges");
+
+  // Work in e.halfedge()'s orientation throughout
+  if (he != e.halfedge()) {
+    he = e.halfedge();
+    crossingIndex = normalCoordinates[e] - 1 - crossingIndex;
+  }
+
+  // === Identify the crossing's curve, its geometry, and its input edge
+  NormalCoordinatesCurve curve;
+  int centerCrossInd;
+  std::tie(curve, centerCrossInd) = normalCoordinates.topologicalTraceBidirectional(he, crossingIndex);
+
+  std::vector<std::pair<SurfacePoint, double>> geodesic =
+      generateFullSingleGeodesicGeometry(*intrinsicMesh, *this, curve);
+  double tCross = geodesic[centerCrossInd + 1].first.tEdge; // along e.halfedge()
+  double tCurve = geodesic[centerCrossInd + 1].second;      // along the curve component
+
+  Halfedge inputHe;
+  double tRange0, tRange1;
+  std::tie(inputHe, tRange0, tRange1) = identifyInputCurveRange(curve);
+  SurfacePoint inputPoint(inputHe, tRange0 + tCurve * (tRange1 - tRange0));
+
+  if (verbose) {
+    std::cout << "insertVertexAtCrossing on " << he << " crossing " << crossingIndex << " (t=" << tCross
+              << ") -> input point " << inputPoint << std::endl;
+  }
+
+  // === New normal coordinates
+  // Start from the ordinary split classified into segment crossingIndex
+  // (the vertex placed just before the crossing, on its tail side), then
+  // remove the absorbed curve's crossings of the new edges: its two halves
+  // terminate at the new vertex instead. The stored crossing halfedge
+  // points to the curve's left, so the curve travels from the he.face()
+  // side (k) to the twin side (l). In the ordinary configuration it
+  // crosses the j-half of e; it also crosses the cross edge toward k iff
+  // its previous crossing is on edge ki (it entered through face ivk), and
+  // the cross edge toward l iff its next crossing is on edge il (it exits
+  // through face vil).
+  Edge prevEdge, nextEdge;
+  if (centerCrossInd > 0) prevEdge = std::get<1>(curve.crossings[centerCrossInd - 1]).edge();
+  if (centerCrossInd + 1 < (int)curve.crossings.size()) {
+    nextEdge = std::get<1>(curve.crossings[centerCrossInd + 1]).edge();
+  }
+  Edge edgeIL = he.twin().next().edge();
+  Edge edgeKI = he.next().next().edge();
+
+  std::array<int, 4> newNormalCoordinates =
+      normalCoordinates.computeInteriorEdgeSplitDataCombinatorial(*this, e, crossingIndex);
+  newNormalCoordinates[1] -= 1; // half toward j
+
+  // Terminal stretches. If the curve has a crossing before e, its incoming
+  // half ends at the new vertex transversally (and crossed the k-side cross
+  // edge iff it entered through ki); the termination is then encoded by the
+  // counts automatically (no other arc can shield the corner without
+  // crossing the curve). If e is the curve's FIRST crossing, the curve
+  // emanates from apex k itself, and its piece from k to the new vertex
+  // coincides with the cross edge toward k, which must be marked as
+  // carrying the curve (normal coordinate -1). Symmetrically on the l side
+  // for the outgoing half.
+  if (centerCrossInd == 0) {
+    GC_SAFETY_ASSERT(newNormalCoordinates[2] == 0,
+                     "a curve emanating from the apex admits no other crossings of the cross edge");
+    newNormalCoordinates[2] = -1;
+  } else {
+    GC_SAFETY_ASSERT(prevEdge == edgeKI || prevEdge == he.next().edge(),
+                     "the crossing before e must be on the boundary of e's face");
+    if (prevEdge == edgeKI) newNormalCoordinates[2] -= 1;
+  }
+  if (centerCrossInd + 1 == (int)curve.crossings.size()) {
+    GC_SAFETY_ASSERT(newNormalCoordinates[0] == 0,
+                     "a curve ending at the apex admits no other crossings of the cross edge");
+    newNormalCoordinates[0] = -1;
+  } else {
+    GC_SAFETY_ASSERT(nextEdge == edgeIL || nextEdge == he.twin().next().next().edge(),
+                     "the crossing after e must be on the boundary of e's twin face");
+    if (nextEdge == edgeIL) newNormalCoordinates[0] -= 1;
+  }
+  GC_SAFETY_ASSERT(newNormalCoordinates[1] >= 0 && newNormalCoordinates[3] >= 0,
+                   "absorbing the crossing produced negative normal coordinates");
+
+  // === Mesh update (mirrors splitInteriorEdge)
+  auto heBary = [&](Halfedge heB, double t) -> Vector3 {
+    int i = halfedgeIndexInTriangle(heB);
+    int j = (i + 1) % 3;
+    Vector3 b = Vector3::zero();
+    b[i] = (1 - t);
+    b[j] = (t);
+    return b;
+  };
+  auto faceEdgeLengths = [&](Face f) -> Vector3 {
+    return Vector3{edgeLengths[f.halfedge().next().edge()], edgeLengths[f.halfedge().next().next().edge()],
+                   edgeLengths[f.halfedge().edge()]};
+  };
+
+  double bary = tCross;
+  double oldLen = edgeLengths[e];
+  std::array<double, 4> newEdgeLengths{0, (1 - bary) * oldLen, 0, bary * oldLen};
+  newEdgeLengths[0] = displacementLength(heBary(e.halfedge().twin(), 1 - bary) - heBary(e.halfedge().twin().next(), 1),
+                                         faceEdgeLengths(e.halfedge().twin().face()));
+  newEdgeLengths[2] = displacementLength(heBary(e.halfedge(), bary) - heBary(e.halfedge().next(), 1),
+                                         faceEdgeLengths(e.halfedge().face()));
+
+  Halfedge newHalfedge = intrinsicMesh->splitEdgeTriangular(e);
+  Vertex newVertex = newHalfedge.vertex();
+  vertexLocations[newVertex] = inputPoint;
+
+  size_t iE = 1;
+  for (Halfedge heOut : newVertex.outgoingHalfedges()) {
+    Edge eOut = heOut.edge();
+    edgeLengths[eOut] = newEdgeLengths[iE];
+    normalCoordinates.edgeCoords[eOut] = newNormalCoordinates[iE];
+    iE = (iE + 3) % 4; // indexing goes counterclockwise, but loop goes clockwise
+  }
+
+  for (Halfedge heOut : newVertex.outgoingHalfedges()) {
+    normalCoordinates.setRoundaboutFromPrevRoundabout(heOut.twin());
+    normalCoordinates.roundabouts[heOut] = 0;
+  }
+  normalCoordinates.roundaboutDegrees[newVertex] = 0;
+
+  for (Face f : newVertex.adjacentFaces()) {
+    updateFaceBasis(f);
+  }
+  for (Vertex v : newVertex.adjacentVertices()) {
+    updateHalfedgeVectorsInVertex(v);
+  }
+  vertexAngleSums[newVertex] = 2 * M_PI;
+  updateHalfedgeVectorsInVertex(newVertex);
+
+  triangulationChanged();
+
+  Halfedge otherNewHalfedge = newHalfedge.next().next().twin().next().next().twin();
+  invokeEdgeSplitCallbacks(e, newHalfedge, otherNewHalfedge);
+
+  return newVertex;
 }
 
 Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
@@ -2286,6 +2439,117 @@ IntegerCoordinatesIntrinsicTriangulation::identifyInputCurveRange(const NormalCo
   } else {
     throw std::runtime_error("curve component starts at a face point; this should be impossible");
   }
+}
+
+Face IntegerCoordinatesIntrinsicTriangulation::inputFaceBesideCurve(const NormalCoordinatesCurve& curve,
+                                                                    bool regionOnTailSide) const {
+  // The component must have been produced by tracing through the halfedge
+  // bounding the region (topologicalTrace*(he, ...)), so that the trace
+  // crosses he positively: he then points to the curve's left, putting
+  // he's tip side on the curve's left and its tail side on the right. An
+  // input halfedge has its face on its left.
+  Halfedge heInput = std::get<0>(identifyInputCurveRange(curve));
+  return regionOnTailSide ? heInput.twin().face() : heInput.face();
+}
+
+Halfedge IntegerCoordinatesIntrinsicTriangulation::inputHalfedgeAlongShared(Halfedge he) const {
+  GC_SAFETY_ASSERT(normalCoordinates[he.edge()] < 0, "edge must be shared with the input mesh");
+  SurfacePoint tail = vertexLocations[he.tailVertex()];
+  SurfacePoint tip = vertexLocations[he.tipVertex()];
+
+  if (tail.type == SurfacePointType::Vertex && tip.type == SurfacePointType::Vertex) {
+    // resolved exactly via roundabouts
+    return getSharedInputEdge(he);
+  }
+
+  // At least one endpoint is an inserted vertex on the input edge; the
+  // input edge is recorded in its location, and the direction follows from
+  // the endpoints' order along it. (The comparison of stored parameters
+  // reproduces the order established when the endpoints were inserted.)
+  Edge inputEdge = (tail.type == SurfacePointType::Edge) ? tail.edge : tip.edge;
+  double tTail = tail.inEdge(inputEdge).tEdge;
+  double tTip = tip.inEdge(inputEdge).tEdge;
+  return (tTip >= tTail) ? inputEdge.halfedge() : inputEdge.halfedge().twin();
+}
+
+Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedRegion(Face f0) const {
+  std::unordered_set<Face> visited;
+  std::vector<Face> queue{f0};
+
+  while (!queue.empty()) {
+    Face f = queue.back();
+    queue.pop_back();
+    if (!visited.insert(f).second) continue;
+
+    // Anchor: a vertex strictly inside an input face names it exactly
+    for (Vertex v : f.adjacentVertices()) {
+      if (vertexLocations[v].type == SurfacePointType::Face) {
+        return vertexLocations[v].face;
+      }
+    }
+
+    for (Halfedge he : f.adjacentHalfedges()) {
+      int n = normalCoordinates[he.edge()];
+      if (n < 0) {
+        // Anchor: a shared edge bounding the region; the region (and its
+        // input face) lie on the left of the corresponding input halfedge
+        return inputHalfedgeAlongShared(he).face();
+      } else if (n > 0) {
+        // Anchor: a crossed edge bounding the region; the region touches
+        // the crossing nearest he's tail, on its tail side
+        NormalCoordinatesCurve curve;
+        int centerInd;
+        std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(he, 0);
+        return inputFaceBesideCurve(curve, true);
+      } else if (he.twin().isInterior()) {
+        Face fn = he.twin().face();
+        if (visited.find(fn) == visited.end()) queue.push_back(fn);
+      }
+    }
+  }
+
+  throw std::runtime_error("inputFaceOfUncrossedRegion: found no anchor; "
+                           "the input mesh appears to have no edges");
+}
+
+Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedEdge(Edge e) const {
+  GC_SAFETY_ASSERT(normalCoordinates[e] == 0, "edge must be uncrossed");
+
+  // Induction: an endpoint strictly inside an input face names it exactly
+  SurfacePoint tail = vertexLocations[e.halfedge().tailVertex()];
+  SurfacePoint tip = vertexLocations[e.halfedge().tipVertex()];
+  if (tail.type == SurfacePointType::Face) return tail.face;
+  if (tip.type == SurfacePointType::Face) return tip.face;
+
+  // Both endpoints lie on input edges/vertices. Within either adjacent
+  // intrinsic face, the region containing e's interior is bounded by the
+  // crossing nearest e along the face's other edges (if any), whose curve
+  // identifies the input face exactly.
+  for (Halfedge he : {e.halfedge(), e.halfedge().twin()}) {
+    if (!he.isInterior()) continue;
+    Halfedge heB = he.next();        // e's region touches heB from its tail
+    Halfedge heC = heB.next();       // ... and heC from its tip
+    if (normalCoordinates[heB.edge()] > 0) {
+      NormalCoordinatesCurve curve;
+      int centerInd;
+      std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(heB, 0);
+      return inputFaceBesideCurve(curve, true);
+    }
+    if (normalCoordinates[heC.edge()] > 0) {
+      NormalCoordinatesCurve curve;
+      int centerInd;
+      std::tie(curve, centerInd) =
+          normalCoordinates.topologicalTraceBidirectional(heC, normalCoordinates[heC.edge()] - 1);
+      return inputFaceBesideCurve(curve, false);
+    }
+    if (normalCoordinates[heB.edge()] < 0) return inputHalfedgeAlongShared(heB).face();
+    if (normalCoordinates[heC.edge()] < 0) return inputHalfedgeAlongShared(heC).face();
+  }
+
+  // Both adjacent faces are entirely uncrossed: search the surrounding
+  // uncrossed region for an anchor
+  Halfedge heInt = e.halfedge().isInterior() ? e.halfedge() : e.halfedge().twin();
+  return inputFaceOfUncrossedRegion(heInt.face());
 }
 
 // Identify shared halfedge, throw exception if halfedge is not shared

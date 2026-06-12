@@ -32,6 +32,14 @@ public:
   // top of the _intrinsic_ mesh---for each intrinsic edge, the encode how many original edges cross it.
   NormalCoordinates normalCoordinates;
 
+  // insertVertex() refuses to insert a vertex which coincides with an
+  // existing one to within this tolerance (in barycentric parameter), and
+  // returns the existing vertex instead. Near-coincident vertices create
+  // near-zero-length intrinsic edges, whose degenerate geometry makes
+  // subsequent floating point classifications unreliable. Set to 0 to
+  // disable. (This refuses an operation; it never alters recorded data.)
+  double insertionCoincidenceEPS = 1e-12;
+
   // ======================================================
   // ======== Queries & Accessors
   // ======================================================
@@ -72,6 +80,16 @@ public:
 
   // Insert circumcenter or split segment
   Vertex insertCircumcenterOrSplitSegment(Face f, bool verbose = false);
+
+  // Insert a vertex exactly AT the crossingIndex'th transverse crossing of
+  // an input-edge curve along he (crossings indexed from he's tail, as in
+  // computeEdgeSplitData). Unlike splitEdge -- whose combinatorial
+  // classification always places the new vertex strictly *between*
+  // crossings -- this cuts the curve at the new vertex: the curve's two
+  // halves terminate there, and the vertex's location is recorded as a
+  // point ON the corresponding input edge. This is the principled way to
+  // obtain an intrinsic vertex lying on an input edge at a chosen crossing.
+  Vertex insertVertexAtCrossing(Halfedge he, int crossingIndex, bool verbose = false);
 
   Vertex splitFace(Face f, Vector3 bary, bool verbose = false);
   Vertex splitEdge(Edge e, double bary, bool verbose = false);
@@ -152,6 +170,40 @@ private:
 
   // Construct the common subdivision for the current triangulation.
   void constructCommonSubdivision() override;
+
+  // === Exact input-element derivation
+  // The element of the input mesh on which a point lies is always determined
+  // combinatorially (from normal coordinates, roundabouts, and the
+  // already-exact elements of existing vertex locations), never by
+  // inspecting floating point coordinate values.
+
+  // Given a transverse curve component and which side of it a region lies
+  // on, return the input face containing that region. The component must
+  // have been produced by tracing through the halfedge bounding the region
+  // (topologicalTrace*(he, ...)), so the trace crosses he positively: he
+  // then points to the curve's left, and an input halfedge has its face on
+  // its left, making this a purely combinatorial lookup.
+  // `regionOnTailSide` says whether the region contains he's tail (true)
+  // or its tip (false).
+  Face inputFaceBesideCurve(const NormalCoordinatesCurve& curve, bool regionOnTailSide) const;
+
+  // For a shared intrinsic halfedge (normal coordinate < 0), return the
+  // input halfedge pointing in the same direction (resolved via roundabouts
+  // when both endpoints are original vertices, and via the endpoints'
+  // recorded positions along the input edge otherwise).
+  Halfedge inputHalfedgeAlongShared(Halfedge he) const;
+
+  // Return the input face containing a maximal connected region of
+  // uncrossed intrinsic faces (every intrinsic edge interior to the region
+  // has normal coordinate <= 0 and is not shared). Searches the region for
+  // an exact anchor: a Face-typed vertex location, a shared boundary edge
+  // (resolved via roundabouts), or a crossed boundary edge (resolved via
+  // inputFaceBesideCurve).
+  Face inputFaceOfUncrossedRegion(Face f) const;
+
+  // The input face containing the interior of an uncrossed (normal
+  // coordinate == 0) intrinsic edge.
+  Face inputFaceOfUncrossedEdge(Edge e) const;
 
   // Find the most-preferred flippable edge incident on v (highest checkFlip
   // score, preferring loop edges, skipping fixed edges). Returns Edge() if

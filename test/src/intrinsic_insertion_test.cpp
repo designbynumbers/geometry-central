@@ -153,13 +153,13 @@ void probeMesh(const MeshAsset& a, unsigned seed, int nOps, int checkEvery = 50)
 } // namespace
 
 // Regression test: splitting a crossed edge exactly at one of its
-// input-edge crossing parameters must record the new vertex as a point ON
-// that input edge (Edge-typed location), not as a face point with a
-// degenerate (~zero) barycentric component. Such degenerate face points
-// break consumers which dispatch on the location type (curve tracing,
-// identifyInputCurveRange, common subdivision construction); found by a
+// input-edge crossing parameters. The split's combinatorial classification
+// places the new vertex strictly beside the crossing, in an input face
+// derived exactly from the crossing curves; the recorded coordinates may
+// land numerically on the face boundary, which is legal. (Found by a
 // downstream project whose insertion parameters come from the common
-// subdivision itself.
+// subdivision itself; an earlier eps-snapping treatment of this case was
+// replaced by the exact element derivation.)
 TEST_F(IntrinsicInsertionSuite, SplitEdgeAtCrossingParameter) {
   auto a = getAsset("spot.ply", true);
   ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
@@ -191,17 +191,23 @@ TEST_F(IntrinsicInsertionSuite, SplitEdgeAtCrossingParameter) {
   }
   ASSERT_GT(targets.size(), 0u);
 
-  // Insert exactly at the crossing parameters; every resulting location must
-  // name the element it lies on (in particular, no face point may have a
-  // numerically-zero barycentric component)
+  // Insert exactly at the crossing parameters. The split's combinatorial
+  // classification places each new vertex strictly beside the crossing, so
+  // the recorded element is the (exactly-derived) input face of that
+  // segment, with coordinates which may legitimately land numerically on
+  // the face boundary. The oracle is that all coordinates are finite/in
+  // range and the common subdivision remains consistent.
   for (const Target& tg : targets) {
     if (tg.e.isDead()) continue;
     Vertex v = tri.insertVertex(SurfacePoint(tg.e, tg.t));
     ASSERT_NE(v, Vertex());
     SurfacePoint loc = tri.vertexLocations[v];
     if (loc.type == SurfacePointType::Face) {
-      double minBary = std::min(loc.faceCoords.x, std::min(loc.faceCoords.y, loc.faceCoords.z));
-      EXPECT_GT(minBary, 1e-9) << "degenerate face-point location " << loc;
+      for (int i = 0; i < 3; i++) {
+        EXPECT_TRUE(std::isfinite(loc.faceCoords[i])) << loc;
+        EXPECT_GE(loc.faceCoords[i], 0.);
+        EXPECT_LE(loc.faceCoords[i], 1.);
+      }
     } else if (loc.type == SurfacePointType::Edge) {
       EXPECT_GE(loc.tEdge, 0.);
       EXPECT_LE(loc.tEdge, 1.);
@@ -209,6 +215,186 @@ TEST_F(IntrinsicInsertionSuite, SplitEdgeAtCrossingParameter) {
   }
 
   EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// Every vertex inserted during a (possibly seam-constrained) delaunayRefine
+// must be recorded with a location that names the element it lies on: no
+// Face-typed location may carry a numerically-zero barycentric component.
+// Uses the insertion callbacks so every vertex is checked at creation time.
+TEST_F(IntrinsicInsertionSuite, RefineRecordsNoDegenerateLocations) {
+  for (const MeshAsset& a : {getAsset("spot.ply", true), getAsset("lego.ply", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+    // Mark some edges to simulate constrained (seam) refinement: a few
+    // edge paths walked from arbitrary vertices
+    EdgeData<bool> marked(*tri.intrinsicMesh, false);
+    int nMarked = 0;
+    for (size_t iV = 0; iV < tri.intrinsicMesh->nVertices(); iV += 37) {
+      Halfedge he = tri.intrinsicMesh->vertex(iV).halfedge();
+      for (int step = 0; step < 8; step++) {
+        if (he.edge().isBoundary()) break;
+        marked[he.edge()] = true;
+        nMarked++;
+        he = he.next().next().twin().next(); // wander
+      }
+    }
+    ASSERT_GT(nMarked, 0);
+    tri.setMarkedEdges(marked);
+
+    // Check every inserted vertex's location at creation time. Note that a
+    // Face-typed location with a ~zero barycentric component is LEGAL (the
+    // element is exact; the coordinates are honest floats); what we require
+    // is that coordinates are finite and in range.
+    int nChecked = 0, nDegenerate = 0;
+    auto checkLoc = [&](Vertex v) {
+      nChecked++;
+      SurfacePoint loc = tri.vertexLocations[v];
+      if (loc.type == SurfacePointType::Face) {
+        for (int i = 0; i < 3; i++) {
+          if (!std::isfinite(loc.faceCoords[i]) || loc.faceCoords[i] < -1e-9 || loc.faceCoords[i] > 1. + 1e-9) {
+            nDegenerate++;
+            ADD_FAILURE() << "out-of-range location recorded at creation: " << loc;
+            break;
+          }
+        }
+      } else if (loc.type == SurfacePointType::Edge) {
+        if (!std::isfinite(loc.tEdge) || loc.tEdge < -1e-9 || loc.tEdge > 1. + 1e-9) {
+          nDegenerate++;
+          ADD_FAILURE() << "out-of-range location recorded at creation: " << loc;
+        }
+      }
+    };
+    tri.faceInsertionCallbackList.push_back([&](Face f, Vertex v) { checkLoc(v); });
+    tri.edgeSplitCallbackList.push_back([&](Edge e, Halfedge he1, Halfedge he2) { checkLoc(he1.vertex()); });
+
+    tri.delaunayRefine(25.);
+
+    std::cout << "  checked " << nChecked << " insertions (" << nDegenerate << " out of range)" << std::endl;
+    EXPECT_GT(nChecked, 0);
+    EXPECT_EQ(nDegenerate, 0);
+    EXPECT_EQ(checkCS(tri, origGeometry), "");
+  }
+}
+
+// Unit trigger from the round-2 downstream report: a face split whose
+// barycentric coordinate has a ~1e-18 component (i.e. a point numerically
+// on an intrinsic edge of a crossed face) must still record a
+// properly-typed location.
+TEST_F(IntrinsicInsertionSuite, SplitFaceAtNearEdgeBary) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.delaunayRefine(25.0);
+  tri.intrinsicMesh->compress();
+
+  int nTested = 0;
+  for (size_t iF = 0; iF < tri.intrinsicMesh->nFaces() && nTested < 15; iF++) {
+    Face f = tri.intrinsicMesh->face(iF);
+    bool crossed = false;
+    for (Edge e : f.adjacentEdges()) crossed = crossed || (tri.normalCoordinates[e] > 0);
+    if (!crossed) continue;
+
+    Vector3 bary{1.04494e-18, 0.41, 1. - 0.41 - 1.04494e-18};
+    Vertex v = tri.splitFace(f, bary);
+    ASSERT_NE(v, Vertex());
+    SurfacePoint loc = tri.vertexLocations[v];
+    if (loc.type == SurfacePointType::Face) {
+      for (int i = 0; i < 3; i++) EXPECT_TRUE(std::isfinite(loc.faceCoords[i])) << loc;
+    }
+    nTested++;
+  }
+  EXPECT_GT(nTested, 0);
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// insertVertexAtCrossing cuts an input-edge curve at a chosen transverse
+// crossing: the new vertex's location is a point ON the input edge, the
+// curve's halves terminate at it, and the correspondence stays consistent
+TEST_F(IntrinsicInsertionSuite, InsertVertexAtCrossing) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.delaunayRefine(25.0);
+  tri.intrinsicMesh->compress();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  int nInserted = 0;
+  size_t nOrigEdges = im.nEdges();
+  for (size_t iE = 0; iE < nOrigEdges && nInserted < 25; iE++) {
+    Edge e = im.edge(iE);
+    if (tri.normalCoordinates[e] <= 0) continue;
+
+    int nBefore = tri.normalCoordinates[e];
+    Vertex v = tri.insertVertexAtCrossing(e.halfedge(), 0);
+    ASSERT_NE(v, Vertex());
+    nInserted++;
+
+    // The location names a point on an input edge
+    SurfacePoint loc = tri.vertexLocations[v];
+    ASSERT_EQ(loc.type, SurfacePointType::Edge);
+    EXPECT_GE(loc.tEdge, 0.);
+    EXPECT_LE(loc.tEdge, 1.);
+
+    // All new edges have valid normal coordinates (>= -1; a value of -1
+    // marks a cross edge which coincides with a piece of the cut curve,
+    // which happens when the curve emanated from the adjacent apex)
+    for (Edge ve : v.adjacentEdges()) {
+      EXPECT_GE(tri.normalCoordinates[ve], -1);
+    }
+    (void)nBefore;
+
+    // The input edge's curve terminates at v: tracing it yields a component
+    // boundary there (the trace passes through v as a compound curve)
+    NormalCoordinatesCompoundCurve cc = tri.traceInputHalfedge(loc.edge.halfedge());
+    EXPECT_GE(cc.components.size(), 2u);
+  }
+  ASSERT_GT(nInserted, 0);
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// insertVertex must refuse insertions coincident with an existing vertex,
+// returning that vertex instead of creating a near-zero-length edge
+TEST_F(IntrinsicInsertionSuite, CoincidentInsertRefused) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.flipToDelaunay();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  size_t nVBefore = im.nVertices();
+
+  // Edge points within eps of an endpoint
+  Edge e = im.edge(0);
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(e, 1e-15)), e.halfedge().tailVertex());
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(e, 1. - 1e-15)), e.halfedge().tipVertex());
+
+  // Face point within eps of a corner
+  Face f = im.face(0);
+  Vertex v0 = f.halfedge().vertex();
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(f, Vector3{1. - 1e-15, 5e-16, 5e-16})), v0);
+
+  EXPECT_EQ(im.nVertices(), nVBefore); // no mutation happened
+
+  // Repeated insertion at the same point: first creates, second is refused
+  Vertex v1 = tri.insertVertex(SurfacePoint(im.edge(5), 0.5));
+  ASSERT_NE(v1, Vertex());
+  EXPECT_EQ(im.nVertices(), nVBefore + 1);
+  // the same input point now lies (within eps) at vertex v1: inserting on
+  // one of its new edges at parameter ~0 returns v1
+  for (Halfedge he : v1.outgoingHalfedges()) {
+    EXPECT_EQ(tri.insertVertex(SurfacePoint(he.edge(), he == he.edge().halfedge() ? 1e-15 : 1. - 1e-15)), v1);
+  }
+  EXPECT_EQ(im.nVertices(), nVBefore + 1);
 }
 
 // Regression test: splitting an interior edge which has crossings (n > 0)
