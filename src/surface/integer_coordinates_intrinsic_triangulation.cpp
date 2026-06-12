@@ -718,7 +718,14 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertCircumcenterOrSplitSegmen
   }
 
   // === Phase 3: Add the new vertex
+  size_t nVBefore = intrinsicMesh->nVertices();
   Vertex newV = insertVertex(newPositionOnIntrinsic);
+  if (intrinsicMesh->nVertices() == nVBefore) {
+    // the insertion was refused (coincident with an existing vertex);
+    // report failure so refinement skips this face rather than retrying
+    // forever
+    return Vertex();
+  }
   return newV;
 }
 
@@ -1331,6 +1338,30 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertex(SurfacePoint pt) {
+  // Refuse insertions coincident with an existing vertex (return that
+  // vertex instead): near-coincident vertices create near-zero-length
+  // intrinsic edges whose degenerate geometry poisons later floating point
+  // classifications. Note this refuses the *operation*; recorded data is
+  // never altered.
+  if (insertionCoincidenceEPS > 0) {
+    switch (pt.type) {
+    case SurfacePointType::Vertex:
+      break;
+    case SurfacePointType::Edge:
+      if (pt.tEdge <= insertionCoincidenceEPS) return pt.edge.halfedge().tailVertex();
+      if (pt.tEdge >= 1. - insertionCoincidenceEPS) return pt.edge.halfedge().tipVertex();
+      break;
+    case SurfacePointType::Face: {
+      size_t iV = 0;
+      for (Vertex v : pt.face.adjacentVertices()) {
+        if (pt.faceCoords[iV] >= 1. - insertionCoincidenceEPS) return v;
+        iV++;
+      }
+      break;
+    }
+    }
+  }
+
   Vertex newVertex;
   switch (pt.type) {
   case SurfacePointType::Vertex:

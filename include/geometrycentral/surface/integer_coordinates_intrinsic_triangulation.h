@@ -32,6 +32,14 @@ public:
   // top of the _intrinsic_ mesh---for each intrinsic edge, the encode how many original edges cross it.
   NormalCoordinates normalCoordinates;
 
+  // insertVertex() refuses to insert a vertex which coincides with an
+  // existing one to within this tolerance (in barycentric parameter), and
+  // returns the existing vertex instead. Near-coincident vertices create
+  // near-zero-length intrinsic edges, whose degenerate geometry makes
+  // subsequent floating point classifications unreliable. Set to 0 to
+  // disable. (This refuses an operation; it never alters recorded data.)
+  double insertionCoincidenceEPS = 1e-12;
+
   // ======================================================
   // ======== Queries & Accessors
   // ======================================================

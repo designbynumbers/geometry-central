@@ -313,6 +313,43 @@ TEST_F(IntrinsicInsertionSuite, SplitFaceAtNearEdgeBary) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// insertVertex must refuse insertions coincident with an existing vertex,
+// returning that vertex instead of creating a near-zero-length edge
+TEST_F(IntrinsicInsertionSuite, CoincidentInsertRefused) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.flipToDelaunay();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  size_t nVBefore = im.nVertices();
+
+  // Edge points within eps of an endpoint
+  Edge e = im.edge(0);
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(e, 1e-15)), e.halfedge().tailVertex());
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(e, 1. - 1e-15)), e.halfedge().tipVertex());
+
+  // Face point within eps of a corner
+  Face f = im.face(0);
+  Vertex v0 = f.halfedge().vertex();
+  EXPECT_EQ(tri.insertVertex(SurfacePoint(f, Vector3{1. - 1e-15, 5e-16, 5e-16})), v0);
+
+  EXPECT_EQ(im.nVertices(), nVBefore); // no mutation happened
+
+  // Repeated insertion at the same point: first creates, second is refused
+  Vertex v1 = tri.insertVertex(SurfacePoint(im.edge(5), 0.5));
+  ASSERT_NE(v1, Vertex());
+  EXPECT_EQ(im.nVertices(), nVBefore + 1);
+  // the same input point now lies (within eps) at vertex v1: inserting on
+  // one of its new edges at parameter ~0 returns v1
+  for (Halfedge he : v1.outgoingHalfedges()) {
+    EXPECT_EQ(tri.insertVertex(SurfacePoint(he.edge(), he == he.edge().halfedge() ? 1e-15 : 1. - 1e-15)), v1);
+  }
+  EXPECT_EQ(im.nVertices(), nVBefore + 1);
+}
+
 // Regression test: splitting an interior edge which has crossings (n > 0)
 // must produce valid (in particular, nonnegative) normal coordinates on the
 // new cross edges. An unsigned-arithmetic bug used to wrap these to -1,
