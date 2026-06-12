@@ -148,6 +148,22 @@ void probeMesh(const MeshAsset& a, unsigned seed, int nOps, int checkEvery = 50)
   std::cout << "  completed " << opCount << " ops" << std::endl;
   std::string csErr = checkCS(tri, origGeometry);
   EXPECT_EQ(csErr, "");
+
+  // Validate the exact containing-face derivation on every uncrossed edge
+  // (internally asserts that both endpoints agree on the face)
+  int nUncrossed = 0;
+  for (Edge e : im.edges()) {
+    if (tri.normalCoordinates[e] != 0) continue;
+    try {
+      Face fIn = tri.inputFaceOfUncrossedEdge(e);
+      EXPECT_NE(fIn, Face());
+    } catch (std::exception& err) {
+      ADD_FAILURE() << "inputFaceOfUncrossedEdge(" << e << "): " << err.what();
+      break;
+    }
+    nUncrossed++;
+  }
+  std::cout << "  validated " << nUncrossed << " uncrossed edges" << std::endl;
 }
 
 } // namespace
@@ -358,6 +374,77 @@ TEST_F(IntrinsicInsertionSuite, InsertVertexAtCrossing) {
   }
   ASSERT_GT(nInserted, 0);
   EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// The seam corner-cut configuration (from a downstream report): two
+// vertices inserted on different input edges sharing a corner, connected by
+// an uncrossed intrinsic edge cutting across that corner. Splitting the
+// corner-cut edge must record a location in the corner's input face --
+// the face shared by both endpoints' input edges -- not on the wrong side
+// of either curve.
+TEST_F(IntrinsicInsertionSuite, SplitCornerCutSeamEdge) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  int nTested = 0;
+  for (size_t iF = 0; iF < mesh.nFaces() && nTested < 20; iF += 37) {
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+    ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+    // Pick a corner of input face F: edges E1 (corner->a) and E2 (corner->b)
+    Face F = mesh.face(iF);
+    Halfedge heF = F.halfedge();
+    if (heF.edge().isBoundary() || heF.next().next().edge().isBoundary()) continue;
+
+    // The same elements in the (initially identical) intrinsic mesh
+    Halfedge heI = im.face(iF).halfedge();
+    Edge e1 = heI.edge();               // shared with input E1
+    Edge e2 = heI.next().next().edge(); // shared with input E2 (other corner edge)
+
+    // Split both shared edges, leaving Edge-typed vertices on E1 and E2.
+    // Splitting e1 then e2 creates a cross edge connecting the two new
+    // vertices (the corner-cut "seam" edge).
+    Vertex v1 = tri.splitEdge(e1, 0.49);
+    ASSERT_NE(v1, Vertex());
+    Vertex v2 = tri.splitEdge(e2, 0.51);
+    ASSERT_NE(v2, Vertex());
+    ASSERT_EQ(tri.vertexLocations[v1].type, SurfacePointType::Edge);
+    ASSERT_EQ(tri.vertexLocations[v2].type, SurfacePointType::Edge);
+    ASSERT_NE(tri.vertexLocations[v1].edge, tri.vertexLocations[v2].edge);
+
+    Edge seam;
+    for (Halfedge he : v1.outgoingHalfedges()) {
+      if (he.tipVertex() == v2) seam = he.edge();
+    }
+    if (seam == Edge() || tri.normalCoordinates[seam] != 0) continue; // configuration didn't arise here
+
+    // Flip the far shared sub-edges at both vertices (where geometrically
+    // possible), so that the curve pieces cross the flanking faces
+    // transversally instead of running along shared edges -- the
+    // configuration in which the containing-face derivation must reason
+    // about curves passing through the seam edge's own endpoints
+    for (Vertex vv : {v1, v2}) {
+      std::vector<Edge> sub;
+      for (Halfedge he : vv.outgoingHalfedges()) {
+        if (tri.normalCoordinates[he.edge()] < 0) sub.push_back(he.edge());
+      }
+      for (Edge se : sub) tri.flipEdgeIfPossible(se);
+    }
+    if (tri.normalCoordinates[seam] != 0) continue; // a flip crossed the seam edge
+
+    // Split the corner-cut edge; this exercises the uncrossed-edge face
+    // derivation with on-curve endpoints on different input edges
+    Vertex vMid = tri.splitEdge(seam, 0.5);
+    ASSERT_NE(vMid, Vertex());
+    SurfacePoint loc = tri.vertexLocations[vMid];
+    ASSERT_EQ(loc.type, SurfacePointType::Face);
+    EXPECT_EQ(loc.face, F) << "corner-cut split recorded in the wrong input face";
+
+    EXPECT_EQ(checkCS(tri, origGeometry), "");
+    nTested++;
+  }
+  EXPECT_GT(nTested, 0);
 }
 
 // A shrinking cascade of insertions toward a fixed point must be refused
