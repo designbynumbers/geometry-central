@@ -81,6 +81,16 @@ public:
   // Insert circumcenter or split segment
   Vertex insertCircumcenterOrSplitSegment(Face f, bool verbose = false);
 
+  // Insert a vertex exactly AT the crossingIndex'th transverse crossing of
+  // an input-edge curve along he (crossings indexed from he's tail, as in
+  // computeEdgeSplitData). Unlike splitEdge -- whose combinatorial
+  // classification always places the new vertex strictly *between*
+  // crossings -- this cuts the curve at the new vertex: the curve's two
+  // halves terminate there, and the vertex's location is recorded as a
+  // point ON the corresponding input edge. This is the principled way to
+  // obtain an intrinsic vertex lying on an input edge at a chosen crossing.
+  Vertex insertVertexAtCrossing(Halfedge he, int crossingIndex, bool verbose = false);
+
   Vertex splitFace(Face f, Vector3 bary, bool verbose = false);
   Vertex splitEdge(Edge e, double bary, bool verbose = false);
   Halfedge splitInteriorEdge(Halfedge he, double bary, bool verbose = false);

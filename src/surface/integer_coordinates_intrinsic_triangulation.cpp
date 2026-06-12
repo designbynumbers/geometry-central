@@ -1823,6 +1823,149 @@ Edge IntegerCoordinatesIntrinsicTriangulation::bestFlippableEdgeAround(Vertex v)
   return bestFlipEdge;
 }
 
+Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertexAtCrossing(Halfedge he, int crossingIndex,
+                                                                        bool verbose) {
+  Edge e = he.edge();
+  GC_SAFETY_ASSERT(normalCoordinates[e] > 0, "insertVertexAtCrossing requires an edge with transverse crossings");
+  GC_SAFETY_ASSERT(crossingIndex >= 0 && crossingIndex < normalCoordinates[e], "crossing index out of range");
+  GC_SAFETY_ASSERT(!e.isBoundary(), "crossed edges cannot be boundary edges");
+
+  // Work in e.halfedge()'s orientation throughout
+  if (he != e.halfedge()) {
+    he = e.halfedge();
+    crossingIndex = normalCoordinates[e] - 1 - crossingIndex;
+  }
+
+  // === Identify the crossing's curve, its geometry, and its input edge
+  NormalCoordinatesCurve curve;
+  int centerCrossInd;
+  std::tie(curve, centerCrossInd) = normalCoordinates.topologicalTraceBidirectional(he, crossingIndex);
+
+  std::vector<std::pair<SurfacePoint, double>> geodesic =
+      generateFullSingleGeodesicGeometry(*intrinsicMesh, *this, curve);
+  double tCross = geodesic[centerCrossInd + 1].first.tEdge; // along e.halfedge()
+  double tCurve = geodesic[centerCrossInd + 1].second;      // along the curve component
+
+  Halfedge inputHe;
+  double tRange0, tRange1;
+  std::tie(inputHe, tRange0, tRange1) = identifyInputCurveRange(curve);
+  SurfacePoint inputPoint(inputHe, tRange0 + tCurve * (tRange1 - tRange0));
+
+  if (verbose) {
+    std::cout << "insertVertexAtCrossing on " << he << " crossing " << crossingIndex << " (t=" << tCross
+              << ") -> input point " << inputPoint << std::endl;
+  }
+
+  // === New normal coordinates
+  // Start from the ordinary split classified into segment crossingIndex
+  // (the vertex placed just before the crossing, on its tail side), then
+  // remove the absorbed curve's crossings of the new edges: its two halves
+  // terminate at the new vertex instead. The stored crossing halfedge
+  // points to the curve's left, so the curve travels from the he.face()
+  // side (k) to the twin side (l). In the ordinary configuration it
+  // crosses the j-half of e; it also crosses the cross edge toward k iff
+  // its previous crossing is on edge ki (it entered through face ivk), and
+  // the cross edge toward l iff its next crossing is on edge il (it exits
+  // through face vil).
+  Edge prevEdge, nextEdge;
+  if (centerCrossInd > 0) prevEdge = std::get<1>(curve.crossings[centerCrossInd - 1]).edge();
+  if (centerCrossInd + 1 < (int)curve.crossings.size()) {
+    nextEdge = std::get<1>(curve.crossings[centerCrossInd + 1]).edge();
+  }
+  Edge edgeIL = he.twin().next().edge();
+  Edge edgeKI = he.next().next().edge();
+
+  std::array<int, 4> newNormalCoordinates =
+      normalCoordinates.computeInteriorEdgeSplitDataCombinatorial(*this, e, crossingIndex);
+  newNormalCoordinates[1] -= 1; // half toward j
+
+  // Terminal stretches. If the curve has a crossing before e, its incoming
+  // half ends at the new vertex transversally (and crossed the k-side cross
+  // edge iff it entered through ki); the termination is then encoded by the
+  // counts automatically (no other arc can shield the corner without
+  // crossing the curve). If e is the curve's FIRST crossing, the curve
+  // emanates from apex k itself, and its piece from k to the new vertex
+  // coincides with the cross edge toward k, which must be marked as
+  // carrying the curve (normal coordinate -1). Symmetrically on the l side
+  // for the outgoing half.
+  if (centerCrossInd == 0) {
+    GC_SAFETY_ASSERT(newNormalCoordinates[2] == 0,
+                     "a curve emanating from the apex admits no other crossings of the cross edge");
+    newNormalCoordinates[2] = -1;
+  } else {
+    GC_SAFETY_ASSERT(prevEdge == edgeKI || prevEdge == he.next().edge(),
+                     "the crossing before e must be on the boundary of e's face");
+    if (prevEdge == edgeKI) newNormalCoordinates[2] -= 1;
+  }
+  if (centerCrossInd + 1 == (int)curve.crossings.size()) {
+    GC_SAFETY_ASSERT(newNormalCoordinates[0] == 0,
+                     "a curve ending at the apex admits no other crossings of the cross edge");
+    newNormalCoordinates[0] = -1;
+  } else {
+    GC_SAFETY_ASSERT(nextEdge == edgeIL || nextEdge == he.twin().next().next().edge(),
+                     "the crossing after e must be on the boundary of e's twin face");
+    if (nextEdge == edgeIL) newNormalCoordinates[0] -= 1;
+  }
+  GC_SAFETY_ASSERT(newNormalCoordinates[1] >= 0 && newNormalCoordinates[3] >= 0,
+                   "absorbing the crossing produced negative normal coordinates");
+
+  // === Mesh update (mirrors splitInteriorEdge)
+  auto heBary = [&](Halfedge heB, double t) -> Vector3 {
+    int i = halfedgeIndexInTriangle(heB);
+    int j = (i + 1) % 3;
+    Vector3 b = Vector3::zero();
+    b[i] = (1 - t);
+    b[j] = (t);
+    return b;
+  };
+  auto faceEdgeLengths = [&](Face f) -> Vector3 {
+    return Vector3{edgeLengths[f.halfedge().next().edge()], edgeLengths[f.halfedge().next().next().edge()],
+                   edgeLengths[f.halfedge().edge()]};
+  };
+
+  double bary = tCross;
+  double oldLen = edgeLengths[e];
+  std::array<double, 4> newEdgeLengths{0, (1 - bary) * oldLen, 0, bary * oldLen};
+  newEdgeLengths[0] = displacementLength(heBary(e.halfedge().twin(), 1 - bary) - heBary(e.halfedge().twin().next(), 1),
+                                         faceEdgeLengths(e.halfedge().twin().face()));
+  newEdgeLengths[2] = displacementLength(heBary(e.halfedge(), bary) - heBary(e.halfedge().next(), 1),
+                                         faceEdgeLengths(e.halfedge().face()));
+
+  Halfedge newHalfedge = intrinsicMesh->splitEdgeTriangular(e);
+  Vertex newVertex = newHalfedge.vertex();
+  vertexLocations[newVertex] = inputPoint;
+
+  size_t iE = 1;
+  for (Halfedge heOut : newVertex.outgoingHalfedges()) {
+    Edge eOut = heOut.edge();
+    edgeLengths[eOut] = newEdgeLengths[iE];
+    normalCoordinates.edgeCoords[eOut] = newNormalCoordinates[iE];
+    iE = (iE + 3) % 4; // indexing goes counterclockwise, but loop goes clockwise
+  }
+
+  for (Halfedge heOut : newVertex.outgoingHalfedges()) {
+    normalCoordinates.setRoundaboutFromPrevRoundabout(heOut.twin());
+    normalCoordinates.roundabouts[heOut] = 0;
+  }
+  normalCoordinates.roundaboutDegrees[newVertex] = 0;
+
+  for (Face f : newVertex.adjacentFaces()) {
+    updateFaceBasis(f);
+  }
+  for (Vertex v : newVertex.adjacentVertices()) {
+    updateHalfedgeVectorsInVertex(v);
+  }
+  vertexAngleSums[newVertex] = 2 * M_PI;
+  updateHalfedgeVectorsInVertex(newVertex);
+
+  triangulationChanged();
+
+  Halfedge otherNewHalfedge = newHalfedge.next().next().twin().next().next().twin();
+  invokeEdgeSplitCallbacks(e, newHalfedge, otherNewHalfedge);
+
+  return newVertex;
+}
+
 Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
   // Stolen from geometrycentral/signpost_intrinsic_triangulation.cpp
   // Strategy: flip edges until the vertex has degree three, then remove by

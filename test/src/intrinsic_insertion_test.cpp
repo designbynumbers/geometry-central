@@ -313,6 +313,53 @@ TEST_F(IntrinsicInsertionSuite, SplitFaceAtNearEdgeBary) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// insertVertexAtCrossing cuts an input-edge curve at a chosen transverse
+// crossing: the new vertex's location is a point ON the input edge, the
+// curve's halves terminate at it, and the correspondence stays consistent
+TEST_F(IntrinsicInsertionSuite, InsertVertexAtCrossing) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.delaunayRefine(25.0);
+  tri.intrinsicMesh->compress();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  int nInserted = 0;
+  size_t nOrigEdges = im.nEdges();
+  for (size_t iE = 0; iE < nOrigEdges && nInserted < 25; iE++) {
+    Edge e = im.edge(iE);
+    if (tri.normalCoordinates[e] <= 0) continue;
+
+    int nBefore = tri.normalCoordinates[e];
+    Vertex v = tri.insertVertexAtCrossing(e.halfedge(), 0);
+    ASSERT_NE(v, Vertex());
+    nInserted++;
+
+    // The location names a point on an input edge
+    SurfacePoint loc = tri.vertexLocations[v];
+    ASSERT_EQ(loc.type, SurfacePointType::Edge);
+    EXPECT_GE(loc.tEdge, 0.);
+    EXPECT_LE(loc.tEdge, 1.);
+
+    // All new edges have valid normal coordinates (>= -1; a value of -1
+    // marks a cross edge which coincides with a piece of the cut curve,
+    // which happens when the curve emanated from the adjacent apex)
+    for (Edge ve : v.adjacentEdges()) {
+      EXPECT_GE(tri.normalCoordinates[ve], -1);
+    }
+    (void)nBefore;
+
+    // The input edge's curve terminates at v: tracing it yields a component
+    // boundary there (the trace passes through v as a compound curve)
+    NormalCoordinatesCompoundCurve cc = tri.traceInputHalfedge(loc.edge.halfedge());
+    EXPECT_GE(cc.components.size(), 2u);
+  }
+  ASSERT_GT(nInserted, 0);
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
 // insertVertex must refuse insertions coincident with an existing vertex,
 // returning that vertex instead of creating a near-zero-length edge
 TEST_F(IntrinsicInsertionSuite, CoincidentInsertRefused) {
