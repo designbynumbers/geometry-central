@@ -153,6 +153,40 @@ private:
   // Construct the common subdivision for the current triangulation.
   void constructCommonSubdivision() override;
 
+  // === Exact input-element derivation
+  // The element of the input mesh on which a point lies is always determined
+  // combinatorially (from normal coordinates, roundabouts, and the
+  // already-exact elements of existing vertex locations), never by
+  // inspecting floating point coordinate values.
+
+  // Given a transverse curve component and which side of it a region lies
+  // on, return the input face containing that region. The component must
+  // have been produced by tracing through the halfedge bounding the region
+  // (topologicalTrace*(he, ...)), so the trace crosses he positively: he
+  // then points to the curve's left, and an input halfedge has its face on
+  // its left, making this a purely combinatorial lookup.
+  // `regionOnTailSide` says whether the region contains he's tail (true)
+  // or its tip (false).
+  Face inputFaceBesideCurve(const NormalCoordinatesCurve& curve, bool regionOnTailSide) const;
+
+  // For a shared intrinsic halfedge (normal coordinate < 0), return the
+  // input halfedge pointing in the same direction (resolved via roundabouts
+  // when both endpoints are original vertices, and via the endpoints'
+  // recorded positions along the input edge otherwise).
+  Halfedge inputHalfedgeAlongShared(Halfedge he) const;
+
+  // Return the input face containing a maximal connected region of
+  // uncrossed intrinsic faces (every intrinsic edge interior to the region
+  // has normal coordinate <= 0 and is not shared). Searches the region for
+  // an exact anchor: a Face-typed vertex location, a shared boundary edge
+  // (resolved via roundabouts), or a crossed boundary edge (resolved via
+  // inputFaceBesideCurve).
+  Face inputFaceOfUncrossedRegion(Face f) const;
+
+  // The input face containing the interior of an uncrossed (normal
+  // coordinate == 0) intrinsic edge.
+  Face inputFaceOfUncrossedEdge(Edge e) const;
+
   // Find the most-preferred flippable edge incident on v (highest checkFlip
   // score, preferring loop edges, skipping fixed edges). Returns Edge() if
   // no incident edge can be flipped.
