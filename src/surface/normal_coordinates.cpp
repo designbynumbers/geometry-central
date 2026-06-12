@@ -169,6 +169,65 @@ void NormalCoordinates::applyVertexInsertionData(Vertex newVertex, const std::ar
   }
 }
 
+void NormalCoordinates::validate() const {
+  auto fail = [](const std::string& msg) { throw std::runtime_error("NormalCoordinates::validate: " + msg); };
+
+  // Coordinate range
+  for (Edge e : mesh.edges()) {
+    if (edgeCoords[e] < -1) {
+      fail("edge " + std::to_string(e.getIndex()) + " has coordinate " + std::to_string(edgeCoords[e]) + " < -1");
+    }
+  }
+
+  // Per-corner consistency: corner coordinates (paper eq. 2, doubled to
+  // stay in integers) must be nonnegative and even -- otherwise no disjoint
+  // curve system with vertex endpoints realizes the counts
+  for (Face f : mesh.faces()) {
+    Halfedge he = f.halfedge();
+    int nij = positivePart(edgeCoords[he.edge()]);
+    int njk = positivePart(edgeCoords[he.next().edge()]);
+    int nki = positivePart(edgeCoords[he.next().next().edge()]);
+
+    auto eman = [](int a, int b, int c) { return std::max(0, a - b - c); };
+    int ek = eman(nij, njk, nki);
+    int ei = eman(njk, nki, nij);
+    int ej = eman(nki, nij, njk);
+
+    auto checkCorner = [&](int a, int b, int opp, int eOther1, int eOther2, const char* which) {
+      int doubled = std::max(0, a + b - opp) - eOther1 - eOther2;
+      if (doubled < 0 || doubled % 2 != 0) {
+        fail(std::string("face ") + std::to_string(f.getIndex()) + " corner " + which +
+             " has invalid doubled corner coordinate " + std::to_string(doubled));
+      }
+    };
+    checkCorner(nij, nki, njk, ej, ek, "i"); // corner i: adjacent ij, ki; opposite jk
+    checkCorner(njk, nij, nki, ek, ei, "j");
+    checkCorner(nki, njk, nij, ei, ej, "k");
+  }
+
+  // Roundabout ranges and the relative relation between consecutive
+  // counterclockwise halfedges at vertices shared with the input mesh
+  for (Vertex v : mesh.vertices()) {
+    size_t d = roundaboutDegrees[v];
+    if (d == 0) continue;
+    Halfedge he = v.halfedge();
+    do {
+      if (roundabouts[he] < 0 || (size_t)roundabouts[he] >= d) {
+        fail("roundabout out of range at halfedge " + std::to_string(he.getIndex()));
+      }
+      if (!he.isInterior()) break;
+      Halfedge heNext = he.next().next().twin();
+      if (heNext == v.halfedge()) break;
+      size_t expected = (roundabouts[he] + strictDegree(he.corner()) - negativePart(edgeCoords[he.edge()])) % d;
+      if ((size_t)roundabouts[heNext] != expected) {
+        fail("roundabout relation violated between halfedges " + std::to_string(he.getIndex()) + " and " +
+             std::to_string(heNext.getIndex()));
+      }
+      he = heNext;
+    } while (he != v.halfedge());
+  }
+}
+
 std::array<int, 4> NormalCoordinates::computeInteriorEdgeSplitDataGeodesic(IntrinsicGeometryInterface& geo, Edge e,
                                                                            double location) {
 
