@@ -152,6 +152,65 @@ void probeMesh(const MeshAsset& a, unsigned seed, int nOps, int checkEvery = 50)
 
 } // namespace
 
+// Regression test: splitting a crossed edge exactly at one of its
+// input-edge crossing parameters must record the new vertex as a point ON
+// that input edge (Edge-typed location), not as a face point with a
+// degenerate (~zero) barycentric component. Such degenerate face points
+// break consumers which dispatch on the location type (curve tracing,
+// identifyInputCurveRange, common subdivision construction); found by a
+// downstream project whose insertion parameters come from the common
+// subdivision itself.
+TEST_F(IntrinsicInsertionSuite, SplitEdgeAtCrossingParameter) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.delaunayRefine(25.0);
+  tri.intrinsicMesh->compress();
+
+  // Read each crossed edge's first transverse crossing parameter off the
+  // common subdivision
+  struct Target {
+    Edge e;
+    double t;
+  };
+  std::vector<Target> targets;
+  {
+    CommonSubdivision& cs = tri.getCommonSubdivision();
+    for (Edge e : tri.intrinsicMesh->edges()) {
+      if (tri.normalCoordinates[e] <= 0) continue;
+      for (CommonSubdivisionPoint* p : cs.pointsAlongB[e]) {
+        if (p->intersectionType != CSIntersectionType::EDGE_TRANSVERSE) continue;
+        if (p->posB.type != SurfacePointType::Edge) continue;
+        targets.push_back({e, p->posB.tEdge});
+        break;
+      }
+      if (targets.size() >= 25) break;
+    }
+  }
+  ASSERT_GT(targets.size(), 0u);
+
+  // Insert exactly at the crossing parameters; every resulting location must
+  // name the element it lies on (in particular, no face point may have a
+  // numerically-zero barycentric component)
+  for (const Target& tg : targets) {
+    if (tg.e.isDead()) continue;
+    Vertex v = tri.insertVertex(SurfacePoint(tg.e, tg.t));
+    ASSERT_NE(v, Vertex());
+    SurfacePoint loc = tri.vertexLocations[v];
+    if (loc.type == SurfacePointType::Face) {
+      double minBary = std::min(loc.faceCoords.x, std::min(loc.faceCoords.y, loc.faceCoords.z));
+      EXPECT_GT(minBary, 1e-9) << "degenerate face-point location " << loc;
+    } else if (loc.type == SurfacePointType::Edge) {
+      EXPECT_GE(loc.tEdge, 0.);
+      EXPECT_LE(loc.tEdge, 1.);
+    }
+  }
+
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
 // Regression test: splitting an interior edge which has crossings (n > 0)
 // must produce valid (in particular, nonnegative) normal coordinates on the
 // new cross edges. An unsigned-arithmetic bug used to wrap these to -1,
