@@ -47,6 +47,12 @@ IntegerCoordinatesIntrinsicTriangulation::IntegerCoordinatesIntrinsicTriangulati
     Vertex vInput = inputMesh.vertex(iV);
     vertexLocations[vIntrinsic] = vInput;
   }
+
+  // Default scale for the geometric insertion-refusal tolerance
+  double meanEdgeLength = 0.;
+  for (Edge e : intrinsicMesh->edges()) meanEdgeLength += edgeLengths[e];
+  meanEdgeLength /= std::max((size_t)1, intrinsicMesh->nEdges());
+  insertionMinEdgeLength = 1e-12 * meanEdgeLength;
 }
 
 // ======================================================
@@ -1362,6 +1368,55 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertex(SurfacePoint pt) {
     }
   }
 
+  // Refuse insertions which would create a near-zero-length intrinsic edge
+  // (the geometric counterpart of the parameter check above; see the member
+  // documentation)
+  if (insertionMinEdgeLength > 0) {
+    auto heBary = [&](Halfedge heB, double t) -> Vector3 {
+      int i = halfedgeIndexInTriangle(heB);
+      int j = (i + 1) % 3;
+      Vector3 b = Vector3::zero();
+      b[i] = (1 - t);
+      b[j] = (t);
+      return b;
+    };
+    auto faceEdgeLengths = [&](Face f) -> Vector3 {
+      return Vector3{edgeLengths[f.halfedge().next().edge()], edgeLengths[f.halfedge().next().next().edge()],
+                     edgeLengths[f.halfedge().edge()]};
+    };
+
+    switch (pt.type) {
+    case SurfacePointType::Vertex:
+      break;
+    case SurfacePointType::Edge: {
+      double L = edgeLengths[pt.edge];
+      Halfedge he = pt.edge.halfedge();
+      if (pt.tEdge * L < insertionMinEdgeLength) return he.tailVertex();
+      if ((1. - pt.tEdge) * L < insertionMinEdgeLength) return he.tipVertex();
+      // distances to the opposite vertices (the would-be cross edges)
+      for (Halfedge heSide : {he, he.twin()}) {
+        if (!heSide.isInterior()) continue;
+        double t = (heSide == he) ? pt.tEdge : 1. - pt.tEdge;
+        double crossLen =
+            displacementLength(heBary(heSide, t) - heBary(heSide.next(), 1), faceEdgeLengths(heSide.face()));
+        if (crossLen < insertionMinEdgeLength) return heSide.next().tipVertex();
+      }
+      break;
+    }
+    case SurfacePointType::Face: {
+      Vector3 fLens = faceEdgeLengths(pt.face);
+      size_t iV = 0;
+      for (Vertex v : pt.face.adjacentVertices()) {
+        Vector3 corner = Vector3::zero();
+        corner[iV] = 1.;
+        if (displacementLength(pt.faceCoords - corner, fLens) < insertionMinEdgeLength) return v;
+        iV++;
+      }
+      break;
+    }
+    }
+  }
+
   Vertex newVertex;
   switch (pt.type) {
   case SurfacePointType::Vertex:
@@ -2473,37 +2528,72 @@ Halfedge IntegerCoordinatesIntrinsicTriangulation::inputHalfedgeAlongShared(Half
 }
 
 Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedRegion(Face f0) const {
-  std::unordered_set<Face> visited;
-  std::vector<Face> queue{f0};
+  // Derive an anchor from face f, where the region of interest touches the
+  // (uncrossed) edge of heEntry. If f has crossed edges, the region within
+  // f adjacent to heEntry is bounded by the crossing nearest heEntry, and
+  // the anchor must be derived relative to heEntry -- using a crossing
+  // elsewhere in f would read off the wrong side of a curve. If f is
+  // crossing-free, it consists of a single region and any anchor in it is
+  // valid. Returns Face() if f offers no anchor (f is crossing-free with no
+  // shared edges and no Face-typed vertex).
+  auto anchorFromFace = [&](Halfedge heEntry) -> Face {
+    Halfedge heB = heEntry.next();        // the region touches heB from its tail...
+    Halfedge heC = heB.next();            // ... and heC from its tip
+    if (normalCoordinates[heB.edge()] > 0) {
+      NormalCoordinatesCurve curve;
+      int centerInd;
+      std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(heB, 0);
+      return inputFaceBesideCurve(curve, true);
+    }
+    if (normalCoordinates[heC.edge()] > 0) {
+      NormalCoordinatesCurve curve;
+      int centerInd;
+      std::tie(curve, centerInd) =
+          normalCoordinates.topologicalTraceBidirectional(heC, normalCoordinates[heC.edge()] - 1);
+      return inputFaceBesideCurve(curve, false);
+    }
 
-  while (!queue.empty()) {
-    Face f = queue.back();
-    queue.pop_back();
-    if (!visited.insert(f).second) continue;
-
-    // Anchor: a vertex strictly inside an input face names it exactly
-    for (Vertex v : f.adjacentVertices()) {
+    // f is crossing-free: a single region
+    for (Vertex v : heEntry.face().adjacentVertices()) {
       if (vertexLocations[v].type == SurfacePointType::Face) {
         return vertexLocations[v].face;
       }
     }
+    if (normalCoordinates[heB.edge()] < 0) return inputHalfedgeAlongShared(heB).face();
+    if (normalCoordinates[heC.edge()] < 0) return inputHalfedgeAlongShared(heC).face();
+    return Face();
+  };
 
-    for (Halfedge he : f.adjacentHalfedges()) {
-      int n = normalCoordinates[he.edge()];
-      if (n < 0) {
-        // Anchor: a shared edge bounding the region; the region (and its
-        // input face) lie on the left of the corresponding input halfedge
-        return inputHalfedgeAlongShared(he).face();
-      } else if (n > 0) {
-        // Anchor: a crossed edge bounding the region; the region touches
-        // the crossing nearest he's tail, on its tail side
-        NormalCoordinatesCurve curve;
-        int centerInd;
-        std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(he, 0);
-        return inputFaceBesideCurve(curve, true);
-      } else if (he.twin().isInterior()) {
-        Face fn = he.twin().face();
-        if (visited.find(fn) == visited.end()) queue.push_back(fn);
+  // Breadth-first search across uncrossed, unshared edges, deriving the
+  // anchor relative to each face's entry halfedge
+  std::unordered_set<Face> visited;
+  std::vector<Halfedge> queue; // entry halfedges of faces to visit
+
+  // Seed: f0 must be crossing-free (it is a face of the uncrossed region);
+  // check its own anchors, else expand
+  visited.insert(f0);
+  for (Halfedge he : f0.adjacentHalfedges()) {
+    GC_SAFETY_ASSERT(normalCoordinates[he.edge()] <= 0, "seed face of an uncrossed region must be crossing-free");
+    Face anchor = anchorFromFace(he);
+    if (anchor != Face()) return anchor;
+    if (normalCoordinates[he.edge()] == 0 && he.twin().isInterior()) queue.push_back(he.twin());
+  }
+
+  while (!queue.empty()) {
+    Halfedge heEntry = queue.back();
+    queue.pop_back();
+    Face f = heEntry.face();
+    if (!visited.insert(f).second) continue;
+
+    Face anchor = anchorFromFace(heEntry);
+    if (anchor != Face()) return anchor;
+
+    // f is crossing-free with no anchor: keep expanding across its
+    // uncrossed, unshared edges
+    for (Halfedge he : {heEntry.next(), heEntry.next().next()}) {
+      if (normalCoordinates[he.edge()] == 0 && he.twin().isInterior() &&
+          visited.find(he.twin().face()) == visited.end()) {
+        queue.push_back(he.twin());
       }
     }
   }
