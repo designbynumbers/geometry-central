@@ -211,6 +211,93 @@ TEST_F(IntrinsicInsertionSuite, SplitEdgeAtCrossingParameter) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// Every vertex inserted during a (possibly seam-constrained) delaunayRefine
+// must be recorded with a location that names the element it lies on: no
+// Face-typed location may carry a numerically-zero barycentric component.
+// Uses the insertion callbacks so every vertex is checked at creation time.
+TEST_F(IntrinsicInsertionSuite, RefineRecordsNoDegenerateLocations) {
+  for (const MeshAsset& a : {getAsset("spot.ply", true), getAsset("lego.ply", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+    // Mark some edges to simulate constrained (seam) refinement: a few
+    // edge paths walked from arbitrary vertices
+    EdgeData<bool> marked(*tri.intrinsicMesh, false);
+    int nMarked = 0;
+    for (size_t iV = 0; iV < tri.intrinsicMesh->nVertices(); iV += 37) {
+      Halfedge he = tri.intrinsicMesh->vertex(iV).halfedge();
+      for (int step = 0; step < 8; step++) {
+        if (he.edge().isBoundary()) break;
+        marked[he.edge()] = true;
+        nMarked++;
+        he = he.next().next().twin().next(); // wander
+      }
+    }
+    ASSERT_GT(nMarked, 0);
+    tri.setMarkedEdges(marked);
+
+    // Check every inserted vertex's location at creation time
+    int nChecked = 0, nDegenerate = 0;
+    auto checkLoc = [&](Vertex v) {
+      nChecked++;
+      SurfacePoint loc = tri.vertexLocations[v];
+      if (loc.type == SurfacePointType::Face) {
+        double minBary = std::min(loc.faceCoords.x, std::min(loc.faceCoords.y, loc.faceCoords.z));
+        if (minBary < 1e-12) {
+          nDegenerate++;
+          ADD_FAILURE() << "degenerate location recorded at creation: " << loc;
+        }
+      }
+    };
+    tri.faceInsertionCallbackList.push_back([&](Face f, Vertex v) { checkLoc(v); });
+    tri.edgeSplitCallbackList.push_back([&](Edge e, Halfedge he1, Halfedge he2) { checkLoc(he1.vertex()); });
+
+    tri.delaunayRefine(25.);
+
+    std::cout << "  checked " << nChecked << " insertions (" << nDegenerate << " degenerate)" << std::endl;
+    EXPECT_GT(nChecked, 0);
+    EXPECT_EQ(nDegenerate, 0);
+    EXPECT_EQ(checkCS(tri, origGeometry), "");
+  }
+}
+
+// Unit trigger from the round-2 downstream report: a face split whose
+// barycentric coordinate has a ~1e-18 component (i.e. a point numerically
+// on an intrinsic edge of a crossed face) must still record a
+// properly-typed location.
+TEST_F(IntrinsicInsertionSuite, SplitFaceAtNearEdgeBary) {
+  auto a = getAsset("spot.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.delaunayRefine(25.0);
+  tri.intrinsicMesh->compress();
+
+  int nTested = 0;
+  for (size_t iF = 0; iF < tri.intrinsicMesh->nFaces() && nTested < 15; iF++) {
+    Face f = tri.intrinsicMesh->face(iF);
+    bool crossed = false;
+    for (Edge e : f.adjacentEdges()) crossed = crossed || (tri.normalCoordinates[e] > 0);
+    if (!crossed) continue;
+
+    Vector3 bary{1.04494e-18, 0.41, 1. - 0.41 - 1.04494e-18};
+    Vertex v = tri.splitFace(f, bary);
+    ASSERT_NE(v, Vertex());
+    SurfacePoint loc = tri.vertexLocations[v];
+    if (loc.type == SurfacePointType::Face) {
+      double minBary = std::min(loc.faceCoords.x, std::min(loc.faceCoords.y, loc.faceCoords.z));
+      EXPECT_GT(minBary, 1e-12) << "degenerate location " << loc;
+    }
+    nTested++;
+  }
+  EXPECT_GT(nTested, 0);
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
 // Regression test: splitting an interior edge which has crossings (n > 0)
 // must produce valid (in particular, nonnegative) normal coordinates on the
 // new cross edges. An unsigned-arithmetic bug used to wrap these to -1,
