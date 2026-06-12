@@ -360,6 +360,65 @@ TEST_F(IntrinsicInsertionSuite, InsertVertexAtCrossing) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// A shrinking cascade of insertions toward a fixed point must be refused
+// once the would-be edges drop below insertionMinEdgeLength, instead of
+// minting ever-tinier elements (the parameter-eps check alone cannot stop
+// this: a split at parameter 0.5 of a tiny edge is far from its endpoints
+// in parameter while being geometrically coincident with everything nearby)
+TEST_F(IntrinsicInsertionSuite, ShrinkingInsertCascadeRefused) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.flipToDelaunay();
+  ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+  EXPECT_GT(tri.insertionMinEdgeLength, 0.); // default-initialized in the constructor
+
+  // Repeatedly split the left half of the same edge: lengths halve each
+  // time, so without the geometric refusal this creates ~200 vertices in a
+  // shrinking cluster
+  Edge e;
+  for (Edge cand : im.edges()) {
+    if (tri.normalCoordinates[cand] == 0 && !cand.isBoundary()) {
+      e = cand;
+      break;
+    }
+  }
+  if (e == Edge()) {
+    for (Edge cand : im.edges()) {
+      if (!cand.isBoundary()) {
+        e = cand;
+        break;
+      }
+    }
+  }
+  ASSERT_NE(e, Edge());
+
+  Vertex anchor = e.halfedge().tailVertex();
+  int nCreated = 0;
+  for (int i = 0; i < 200; i++) {
+    // find the current edge out of `anchor` along the shrinking direction:
+    // the shortest edge at the anchor
+    Edge eShort;
+    double shortest = std::numeric_limits<double>::infinity();
+    for (Edge ve : anchor.adjacentEdges()) {
+      if (tri.edgeLengths[ve] < shortest) {
+        shortest = tri.edgeLengths[ve];
+        eShort = ve;
+      }
+    }
+    size_t nVBefore = im.nVertices();
+    tri.insertVertex(SurfacePoint(eShort, eShort.halfedge().tailVertex() == anchor ? 0.5 : 0.5));
+    if (im.nVertices() > nVBefore) nCreated++;
+  }
+
+  // The cascade must be cut off long before 200 insertions
+  EXPECT_LT(nCreated, 60);
+  EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
 // insertVertex must refuse insertions coincident with an existing vertex,
 // returning that vertex instead of creating a near-zero-length edge
 TEST_F(IntrinsicInsertionSuite, CoincidentInsertRefused) {

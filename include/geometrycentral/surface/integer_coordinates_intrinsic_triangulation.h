@@ -40,6 +40,17 @@ public:
   // disable. (This refuses an operation; it never alters recorded data.)
   double insertionCoincidenceEPS = 1e-12;
 
+  // insertVertex() also refuses to insert a vertex which would create an
+  // intrinsic edge shorter than this length (returning the existing vertex
+  // it nearly coincides with). This is the geometric counterpart of the
+  // parameter tolerance above: once degenerate elements exist, parameter
+  // distance no longer bounds geometric distance, and each tiny insertion
+  // mints tinier elements for the next (a runaway cascade under repeated
+  // refinement against an unsatisfiable target). Initialized in the
+  // constructor to 1e-12 times the mean input edge length; set to 0 to
+  // disable.
+  double insertionMinEdgeLength = 0.;
+
   // ======================================================
   // ======== Queries & Accessors
   // ======================================================
