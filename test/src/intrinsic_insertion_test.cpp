@@ -138,6 +138,12 @@ void probeMesh(const MeshAsset& a, unsigned seed, int nOps, int checkEvery = 50)
 
     // Periodically validate
     if (iOp % checkEvery == checkEvery - 1) {
+      try {
+        tri.validate();
+      } catch (std::exception& vErr) {
+        ADD_FAILURE() << "after op " << iOp << " (" << desc.str() << "): " << vErr.what();
+        return;
+      }
       std::string csErr = checkCS(tri, origGeometry);
       if (!csErr.empty()) {
         ADD_FAILURE() << "after op " << iOp << " (" << desc.str() << "): " << csErr;
@@ -146,6 +152,7 @@ void probeMesh(const MeshAsset& a, unsigned seed, int nOps, int checkEvery = 50)
     }
   }
   std::cout << "  completed " << opCount << " ops" << std::endl;
+  EXPECT_NO_THROW(tri.validate());
   std::string csErr = checkCS(tri, origGeometry);
   EXPECT_EQ(csErr, "");
 
@@ -374,6 +381,87 @@ TEST_F(IntrinsicInsertionSuite, InsertVertexAtCrossing) {
   }
   ASSERT_GT(nInserted, 0);
   EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// validate() must catch representative corruptions of each invariant
+// class; this is the validator's own regression test (a validator that
+// passes everything is worse than none)
+TEST_F(IntrinsicInsertionSuite, ValidatorCatchesCorruption) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  auto freshTri = [&]() {
+    auto tri = std::make_unique<IntegerCoordinatesIntrinsicTriangulation>(mesh, origGeometry);
+    tri->flipToDelaunay();
+    // a few inserts so all location types exist
+    tri->splitFace(tri->intrinsicMesh->face(3), Vector3{0.3, 0.3, 0.4});
+    for (Edge e : tri->intrinsicMesh->edges()) {
+      if (tri->normalCoordinates[e] == -1 && !e.isBoundary()) {
+        tri->splitEdge(e, 0.4);
+        break;
+      }
+    }
+    EXPECT_NO_THROW(tri->validate());
+    return tri;
+  };
+
+  { // normal coordinate range
+    auto tri = freshTri();
+    tri->normalCoordinates.edgeCoords[tri->intrinsicMesh->edge(0)] = -2;
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+  }
+  { // crossing count corruption (breaks corner consistency or coverage)
+    auto tri = freshTri();
+    for (Edge e : tri->intrinsicMesh->edges()) {
+      if (tri->normalCoordinates[e] > 0) {
+        tri->normalCoordinates.edgeCoords[e] += 1;
+        break;
+      }
+    }
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+  }
+  { // wrong location type: face point claimed on an edge
+    auto tri = freshTri();
+    for (Vertex v : tri->intrinsicMesh->vertices()) {
+      if (tri->vertexLocations[v].type == SurfacePointType::Face) {
+        tri->vertexLocations[v] = SurfacePoint(tri->inputMesh.edge(0), 0.5);
+        break;
+      }
+    }
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+  }
+  { // wrong location element: on-curve vertex moved to a different input edge
+    auto tri = freshTri();
+    for (Vertex v : tri->intrinsicMesh->vertices()) {
+      if (tri->vertexLocations[v].type == SurfacePointType::Edge) {
+        Edge wrong;
+        for (Edge eIn : tri->inputMesh.edges()) {
+          if (eIn != tri->vertexLocations[v].edge) {
+            wrong = eIn;
+            break;
+          }
+        }
+        tri->vertexLocations[v] = SurfacePoint(wrong, 0.5);
+        break;
+      }
+    }
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+  }
+  { // roundabout corruption
+    auto tri = freshTri();
+    Halfedge he = tri->intrinsicMesh->vertex(0).halfedge();
+    tri->normalCoordinates.roundabouts[he] =
+        (tri->normalCoordinates.roundabouts[he] + 1) % tri->normalCoordinates.roundaboutDegrees[he.vertex()];
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+  }
+  { // geometric layer: broken triangle inequality
+    auto tri = freshTri();
+    Edge e0 = tri->intrinsicMesh->edge(0);
+    tri->edgeLengths[e0] = 1e6 * tri->edgeLengths[e0];
+    EXPECT_THROW(tri->validate(), std::runtime_error);
+    EXPECT_NO_THROW(tri->validate(false)); // geometry check off: combinatorial layer still fine
+  }
 }
 
 // The seam corner-cut configuration (from a downstream report): two

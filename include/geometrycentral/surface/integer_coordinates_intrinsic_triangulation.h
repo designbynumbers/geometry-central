@@ -69,6 +69,22 @@ public:
 
   bool checkEdgeOriginal(Edge e) const override;
 
+  // Check the full data structure contract, throwing std::runtime_error
+  // with a description of the first violation found. Checks, in order:
+  // the local normal coordinate and roundabout conditions
+  // (NormalCoordinates::validate()); the identification of input vertices;
+  // boundary and shared edge conventions; that tracing every input edge
+  // yields chains which cover every transverse crossing exactly once and
+  // use every shared edge exactly once, with chain junctions at vertices
+  // recorded ON that input edge and chain ends at the input edge's
+  // endpoints; that every vertex location's type and element agree with
+  // the curve structure (on-curve vertices carry exactly two chain pieces
+  // of their recorded edge; face vertices carry none and match the wedge
+  // derivation); and optionally the per-face triangle inequality. Intended
+  // for tests and debugging; cost is roughly O(total crossings x mean
+  // curve length).
+  void validate(bool checkGeometry = true) const;
+
   // ======================================================
   // ======== Low-Level Mutators
   // ======================================================

@@ -313,6 +313,226 @@ SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnInput(co
 
 bool IntegerCoordinatesIntrinsicTriangulation::checkEdgeOriginal(Edge e) const { return normalCoordinates[e] == -1; }
 
+void IntegerCoordinatesIntrinsicTriangulation::validate(bool checkGeometry) const {
+  auto fail = [](const std::string& msg) {
+    throw std::runtime_error("IntegerCoordinatesIntrinsicTriangulation::validate: " + msg);
+  };
+
+  // === Local coordinate and roundabout conditions
+  normalCoordinates.validate();
+
+  // === Input vertices are identified, with matching locations
+  if (intrinsicMesh->nVertices() < inputMesh.nVertices()) fail("intrinsic mesh has fewer vertices than the input");
+  for (size_t iV = 0; iV < inputMesh.nVertices(); iV++) {
+    const SurfacePoint& loc = vertexLocations[intrinsicMesh->vertex(iV)];
+    if (loc.type != SurfacePointType::Vertex || loc.vertex != inputMesh.vertex(iV)) {
+      fail("intrinsic vertex " + std::to_string(iV) + " is not identified with input vertex " + std::to_string(iV));
+    }
+  }
+  for (size_t iV = inputMesh.nVertices(); iV < intrinsicMesh->nVertices(); iV++) {
+    Vertex v = intrinsicMesh->vertex(iV);
+    if (v.isDead()) continue;
+    if (vertexLocations[v].type == SurfacePointType::Vertex) {
+      fail("inserted vertex " + std::to_string(iV) + " has a Vertex-typed location");
+    }
+  }
+
+  // === Edge conventions
+  for (Edge e : intrinsicMesh->edges()) {
+    if (e.isBoundary() && normalCoordinates[e] != -1) {
+      fail("boundary edge " + std::to_string(e.getIndex()) + " is not shared (n = " +
+           std::to_string(normalCoordinates[e]) + ")");
+    }
+  }
+
+  // === Trace every input edge; check chain structure and collect coverage
+  EdgeData<std::vector<char>> crossingUsed(*intrinsicMesh);
+  for (Edge e : intrinsicMesh->edges()) {
+    if (normalCoordinates[e] > 0) crossingUsed[e] = std::vector<char>(normalCoordinates[e], 0);
+  }
+  EdgeData<char> sharedUsed(*intrinsicMesh, 0);
+  VertexData<int> nPieceEnds(*intrinsicMesh, 0);        // chain-piece terminations at each vertex
+  VertexData<Edge> pieceEndInputEdge(*intrinsicMesh);   // which input edge those pieces belong to
+
+  for (Edge eA : inputMesh.edges()) {
+    NormalCoordinatesCompoundCurve cc = traceInputEdge(eA);
+    if (cc.components.empty()) fail("input edge " + std::to_string(eA.getIndex()) + " traced to no components");
+
+    Vertex chainStart = intrinsicMesh->vertex(eA.halfedge().tailVertex().getIndex());
+    Vertex chainEnd = intrinsicMesh->vertex(eA.halfedge().tipVertex().getIndex());
+
+    Vertex prevEnd = chainStart;
+    for (size_t iC = 0; iC < cc.components.size(); iC++) {
+      const NormalCoordinatesCurve& comp = cc.components[iC];
+      if (comp.crossings.empty()) fail("input edge " + std::to_string(eA.getIndex()) + " has an empty component");
+
+      Vertex startV, endV;
+      if (std::get<0>(comp.crossings[0]) < 0) {
+        // shared piece
+        Halfedge heB = std::get<1>(comp.crossings[0]);
+        if (comp.crossings.size() != 1) fail("shared component with more than one entry");
+        if (normalCoordinates[heB.edge()] >= 0) {
+          fail("shared component along non-shared edge " + std::to_string(heB.edge().getIndex()));
+        }
+        if (sharedUsed[heB.edge()]) {
+          fail("shared edge " + std::to_string(heB.edge().getIndex()) + " used by more than one chain piece");
+        }
+        sharedUsed[heB.edge()] = 1;
+        startV = heB.tailVertex();
+        endV = heB.tipVertex();
+      } else {
+        // transverse piece: mark its crossings (canonical index along
+        // edge.halfedge())
+        for (const auto& cr : comp.crossings) {
+          int idx = std::get<0>(cr);
+          Halfedge heB = std::get<1>(cr);
+          Edge eB = heB.edge();
+          if (normalCoordinates[eB] <= 0 || idx < 0 || idx >= normalCoordinates[eB]) {
+            fail("component of input edge " + std::to_string(eA.getIndex()) + " has invalid crossing on edge " +
+                 std::to_string(eB.getIndex()));
+          }
+          int canon = (heB == eB.halfedge()) ? idx : normalCoordinates[eB] - 1 - idx;
+          if (crossingUsed[eB][canon]) {
+            fail("crossing " + std::to_string(canon) + " of edge " + std::to_string(eB.getIndex()) +
+                 " used by more than one chain piece");
+          }
+          crossingUsed[eB][canon] = 1;
+        }
+        Halfedge heFirst = std::get<1>(comp.crossings.front());
+        Halfedge heLast = std::get<1>(comp.crossings.back());
+        startV = heFirst.next().next().vertex();
+        endV = heLast.twin().next().tipVertex();
+      }
+
+      if (startV != prevEnd) {
+        fail("chain of input edge " + std::to_string(eA.getIndex()) + " is not connected at component " +
+             std::to_string(iC));
+      }
+
+      bool lastComp = (iC + 1 == cc.components.size());
+      if (lastComp) {
+        if (endV != chainEnd) fail("chain of input edge " + std::to_string(eA.getIndex()) + " ends at wrong vertex");
+      } else {
+        // interior junction: an inserted vertex recorded ON this input edge
+        const SurfacePoint& loc = vertexLocations[endV];
+        if (loc.type != SurfacePointType::Edge || loc.edge != eA) {
+          fail("chain junction vertex " + std::to_string(endV.getIndex()) + " of input edge " +
+               std::to_string(eA.getIndex()) + " is not recorded on it");
+        }
+      }
+
+      // piece terminations (for the per-vertex location checks below); only
+      // junction/end events at INSERTED vertices are constrained
+      for (Vertex v : {startV, endV}) {
+        if (vertexLocations[v].type == SurfacePointType::Vertex) continue;
+        nPieceEnds[v]++;
+        if (pieceEndInputEdge[v] != Edge() && pieceEndInputEdge[v] != eA) {
+          fail("vertex " + std::to_string(v.getIndex()) + " carries chain pieces of two different input edges");
+        }
+        pieceEndInputEdge[v] = eA;
+      }
+
+      prevEnd = endV;
+    }
+  }
+
+  // === Coverage: every crossing and shared edge accounted for exactly once
+  for (Edge e : intrinsicMesh->edges()) {
+    if (normalCoordinates[e] > 0) {
+      for (int k = 0; k < normalCoordinates[e]; k++) {
+        if (!crossingUsed[e][k]) {
+          fail("crossing " + std::to_string(k) + " of edge " + std::to_string(e.getIndex()) +
+               " is not covered by any input edge's chain");
+        }
+      }
+    } else if (normalCoordinates[e] < 0) {
+      if (!sharedUsed[e]) {
+        fail("shared edge " + std::to_string(e.getIndex()) + " is not used by any input edge's chain");
+      }
+    }
+  }
+
+  // === Vertex locations agree with the curve structure
+  for (Vertex v : intrinsicMesh->vertices()) {
+    const SurfacePoint& loc = vertexLocations[v];
+    switch (loc.type) {
+    case SurfacePointType::Vertex:
+      break; // checked above
+    case SurfacePointType::Edge:
+      if (nPieceEnds[v] != 2 || pieceEndInputEdge[v] != loc.edge) {
+        fail("vertex " + std::to_string(v.getIndex()) + " is recorded on input edge " +
+             std::to_string(loc.edge.getIndex()) + " but carries " + std::to_string(nPieceEnds[v]) +
+             " chain piece(s)" +
+             (pieceEndInputEdge[v] == Edge() ? "" : " of input edge " +
+                                                        std::to_string(pieceEndInputEdge[v].getIndex())));
+      }
+      if (!std::isfinite(loc.tEdge) || loc.tEdge < 0. || loc.tEdge > 1.) {
+        fail("vertex " + std::to_string(v.getIndex()) + " has out-of-range edge coordinate");
+      }
+      break;
+    case SurfacePointType::Face: {
+      if (nPieceEnds[v] != 0) {
+        fail("vertex " + std::to_string(v.getIndex()) + " is recorded inside a face but carries " +
+             std::to_string(nPieceEnds[v]) + " chain piece(s)");
+      }
+      for (int i = 0; i < 3; i++) {
+        if (!std::isfinite(loc.faceCoords[i]) || loc.faceCoords[i] < 0. || loc.faceCoords[i] > 1.) {
+          fail("vertex " + std::to_string(v.getIndex()) + " has out-of-range face coordinates");
+        }
+      }
+      break;
+    }
+    }
+  }
+
+  // === Element cross-validation along edges: each uncrossed edge's
+  // endpoints must agree on its containing input face (the wedge
+  // derivation asserts agreement internally and adjacency of both
+  // endpoints), and shared edges' endpoints must lie on the common input
+  // edge
+  for (Edge e : intrinsicMesh->edges()) {
+    if (normalCoordinates[e] == 0) {
+      Face fIn = inputFaceOfUncrossedEdge(e);
+      if (fIn == Face()) fail("uncrossed edge " + std::to_string(e.getIndex()) + " has no containing input face");
+      for (Vertex v : {e.halfedge().tailVertex(), e.halfedge().tipVertex()}) {
+        if (!checkAdjacent(vertexLocations[v], SurfacePoint(fIn, Vector3::zero()))) {
+          fail("endpoint " + std::to_string(v.getIndex()) + " of uncrossed edge " + std::to_string(e.getIndex()) +
+               " does not lie on its containing input face");
+        }
+      }
+    } else if (normalCoordinates[e] < 0) {
+      Halfedge heInput = inputHalfedgeAlongShared(e.halfedge());
+      for (Vertex v : {e.halfedge().tailVertex(), e.halfedge().tipVertex()}) {
+        const SurfacePoint& loc = vertexLocations[v];
+        bool onEdge = (loc.type == SurfacePointType::Edge && loc.edge == heInput.edge()) ||
+                      (loc.type == SurfacePointType::Vertex &&
+                       (loc.vertex == heInput.tailVertex() || loc.vertex == heInput.tipVertex()));
+        if (!onEdge) {
+          fail("endpoint " + std::to_string(v.getIndex()) + " of shared edge " + std::to_string(e.getIndex()) +
+               " does not lie on the input edge it runs along");
+        }
+      }
+    }
+  }
+
+  // === Geometric layer: triangle inequality (toleranced)
+  if (checkGeometry) {
+    for (Face f : intrinsicMesh->faces()) {
+      Halfedge he = f.halfedge();
+      double a = edgeLengths[he.edge()];
+      double b = edgeLengths[he.next().edge()];
+      double c = edgeLengths[he.next().next().edge()];
+      if (!(std::isfinite(a) && std::isfinite(b) && std::isfinite(c)) || a <= 0 || b <= 0 || c <= 0) {
+        fail("face " + std::to_string(f.getIndex()) + " has a nonpositive or nonfinite edge length");
+      }
+      double tol = 1e-8 * (a + b + c);
+      if (a + b < c - tol || b + c < a - tol || c + a < b - tol) {
+        fail("face " + std::to_string(f.getIndex()) + " violates the triangle inequality");
+      }
+    }
+  }
+}
+
 void IntegerCoordinatesIntrinsicTriangulation::constructCommonSubdivision() {
 
   intrinsicMesh->compress();
