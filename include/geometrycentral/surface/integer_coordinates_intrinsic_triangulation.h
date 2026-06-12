@@ -172,6 +172,20 @@ public:
 
   void setFixedEdges(const EdgeData<bool>& fixedEdges);
 
+  // The input face containing the wedge at heOut's tail vertex in which
+  // heOut lies. The input edges through the vertex partition its
+  // neighborhood into wedges; the wedge is identified rotationally
+  // (roundabouts at original vertices; the two curve-piece slots at
+  // inserted edge vertices), so no side-of-curve geometry is involved.
+  // heOut must not be shared (it would lie ON an input edge, not in a
+  // wedge).
+  Face wedgeInputFace(Halfedge heOut) const;
+
+  // The input face containing the interior of an uncrossed (normal
+  // coordinate == 0) intrinsic edge: the wedge face at its endpoints
+  // (derived at both ends, asserting agreement).
+  Face inputFaceOfUncrossedEdge(Edge e) const;
+
   // If f is entirely contained in some face of the input mesh, return that
   // face Otherwise return Face()
   Face getParentFace(Face f) const;
@@ -204,17 +218,6 @@ private:
   // recorded positions along the input edge otherwise).
   Halfedge inputHalfedgeAlongShared(Halfedge he) const;
 
-  // Return the input face containing a maximal connected region of
-  // uncrossed intrinsic faces (every intrinsic edge interior to the region
-  // has normal coordinate <= 0 and is not shared). Searches the region for
-  // an exact anchor: a Face-typed vertex location, a shared boundary edge
-  // (resolved via roundabouts), or a crossed boundary edge (resolved via
-  // inputFaceBesideCurve).
-  Face inputFaceOfUncrossedRegion(Face f) const;
-
-  // The input face containing the interior of an uncrossed (normal
-  // coordinate == 0) intrinsic edge.
-  Face inputFaceOfUncrossedEdge(Edge e) const;
 
   // Find the most-preferred flippable edge incident on v (highest checkFlip
   // score, preferring loop edges, skipping fixed edges). Returns Edge() if

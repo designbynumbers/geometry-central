@@ -818,7 +818,17 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
   } else if (normalCoordinates[f.halfedge().edge()] <= 0 && normalCoordinates[f.halfedge().next().edge()] <= 0 &&
              normalCoordinates[f.halfedge().next().next().edge()] <= 0) {
 
-    insertionFace = inputFaceOfUncrossedRegion(f);
+    {
+      Halfedge heWedge;
+      for (Halfedge fhe : f.adjacentHalfedges()) {
+        if (normalCoordinates[fhe.edge()] >= 0) {
+          heWedge = fhe;
+          break;
+        }
+      }
+      GC_SAFETY_ASSERT(heWedge != Halfedge(), "an all-shared face belongs to the earlier case");
+      insertionFace = wedgeInputFace(heWedge);
+    }
 
     std::array<Vector3, 3> vertexBary;
     size_t iV = 0;
@@ -2527,119 +2537,115 @@ Halfedge IntegerCoordinatesIntrinsicTriangulation::inputHalfedgeAlongShared(Half
   return (tTip >= tTail) ? inputEdge.halfedge() : inputEdge.halfedge().twin();
 }
 
-Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedRegion(Face f0) const {
-  // Derive an anchor from face f, where the region of interest touches the
-  // (uncrossed) edge of heEntry. If f has crossed edges, the region within
-  // f adjacent to heEntry is bounded by the crossing nearest heEntry, and
-  // the anchor must be derived relative to heEntry -- using a crossing
-  // elsewhere in f would read off the wrong side of a curve. If f is
-  // crossing-free, it consists of a single region and any anchor in it is
-  // valid. Returns Face() if f offers no anchor (f is crossing-free with no
-  // shared edges and no Face-typed vertex).
-  auto anchorFromFace = [&](Halfedge heEntry) -> Face {
-    Halfedge heB = heEntry.next();        // the region touches heB from its tail...
-    Halfedge heC = heB.next();            // ... and heC from its tip
-    if (normalCoordinates[heB.edge()] > 0) {
-      NormalCoordinatesCurve curve;
-      int centerInd;
-      std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(heB, 0);
-      return inputFaceBesideCurve(curve, true);
-    }
-    if (normalCoordinates[heC.edge()] > 0) {
-      NormalCoordinatesCurve curve;
-      int centerInd;
-      std::tie(curve, centerInd) =
-          normalCoordinates.topologicalTraceBidirectional(heC, normalCoordinates[heC.edge()] - 1);
-      return inputFaceBesideCurve(curve, false);
-    }
+Face IntegerCoordinatesIntrinsicTriangulation::wedgeInputFace(Halfedge heOut) const {
+  Vertex u = heOut.vertex();
+  const SurfacePoint& loc = vertexLocations[u];
+  GC_SAFETY_ASSERT(normalCoordinates[heOut.edge()] >= 0, "wedgeInputFace requires a non-shared outgoing halfedge");
 
-    // f is crossing-free: a single region
-    for (Vertex v : heEntry.face().adjacentVertices()) {
-      if (vertexLocations[v].type == SurfacePointType::Face) {
-        return vertexLocations[v].face;
-      }
-    }
-    if (normalCoordinates[heB.edge()] < 0) return inputHalfedgeAlongShared(heB).face();
-    if (normalCoordinates[heC.edge()] < 0) return inputHalfedgeAlongShared(heC).face();
-    return Face();
-  };
+  switch (loc.type) {
+  case SurfacePointType::Face:
+    // u lies strictly inside an input face; everything around it does too
+    return loc.face;
 
-  // Breadth-first search across uncrossed, unshared edges, deriving the
-  // anchor relative to each face's entry halfedge
-  std::unordered_set<Face> visited;
-  std::vector<Halfedge> queue; // entry halfedges of faces to visit
-
-  // Seed: f0 must be crossing-free (it is a face of the uncrossed region);
-  // check its own anchors, else expand
-  visited.insert(f0);
-  for (Halfedge he : f0.adjacentHalfedges()) {
-    GC_SAFETY_ASSERT(normalCoordinates[he.edge()] <= 0, "seed face of an uncrossed region must be crossing-free");
-    Face anchor = anchorFromFace(he);
-    if (anchor != Face()) return anchor;
-    if (normalCoordinates[he.edge()] == 0 && he.twin().isInterior()) queue.push_back(he.twin());
+  case SurfacePointType::Vertex: {
+    // u is an original vertex: the input edges around it partition its
+    // neighborhood into wedges, and the roundabout of heOut is the index of
+    // the first input edge at-or-after heOut in counterclockwise order, so
+    // the wedge containing heOut is bounded clockwise by input edge
+    // (roundabout - 1), whose halfedge has the wedge's face on its left.
+    Vertex inputV = loc.vertex;
+    size_t d = normalCoordinates.roundaboutDegrees[u];
+    GC_SAFETY_ASSERT(d > 0, "original vertices must have input edges");
+    size_t r = (normalCoordinates.roundabouts[heOut] + d - 1) % d;
+    Halfedge heIn = inputV.halfedge();
+    for (size_t i = 0; i < r; i++) heIn = heIn.next().next().twin();
+    return heIn.face();
   }
 
-  while (!queue.empty()) {
-    Halfedge heEntry = queue.back();
-    queue.pop_back();
-    Face f = heEntry.face();
-    if (!visited.insert(f).second) continue;
+  case SurfacePointType::Edge: {
+    // u is an inserted vertex on input edge E: exactly one curve (E) passes
+    // through u, leaving as two pieces. Each piece occupies a rotational
+    // slot around u: along a shared incident edge, or through a corner it
+    // emanates from. Walking counterclockwise from a piece sweeps the left
+    // side of that piece's travel direction, so heOut's wedge face is the
+    // left face of the first piece if heOut lies in the counterclockwise
+    // arc from it to the other piece, and the right face otherwise.
+    //
+    // Slots: outgoing halfedge i at 2*i, the corner between halfedges i and
+    // i+1 at 2*i + 1 (counterclockwise order).
+    std::vector<Halfedge> outgoing;
+    {
+      Halfedge he = u.halfedge();
+      do {
+        outgoing.push_back(he);
+        if (!he.isInterior()) break;
+        he = he.next().next().twin();
+      } while (he != u.halfedge());
+    }
+    size_t nSlots = 2 * outgoing.size();
 
-    Face anchor = anchorFromFace(heEntry);
-    if (anchor != Face()) return anchor;
-
-    // f is crossing-free with no anchor: keep expanding across its
-    // uncrossed, unshared edges
-    for (Halfedge he : {heEntry.next(), heEntry.next().next()}) {
-      if (normalCoordinates[he.edge()] == 0 && he.twin().isInterior() &&
-          visited.find(he.twin().face()) == visited.end()) {
-        queue.push_back(he.twin());
+    int slotA = -1, slotB = -1;
+    Halfedge pieceAInput; // input halfedge along piece A's travel (away from u)
+    for (size_t i = 0; i < outgoing.size(); i++) {
+      Halfedge he = outgoing[i];
+      if (normalCoordinates[he.edge()] < 0) {
+        // piece running along a shared edge
+        if (slotA < 0) {
+          slotA = 2 * i;
+          pieceAInput = inputHalfedgeAlongShared(he);
+        } else {
+          GC_SAFETY_ASSERT(slotB < 0, "an inserted edge vertex has exactly two curve pieces");
+          slotB = 2 * i;
+        }
+      }
+      if (he.isInterior() && normalCoordinates.strictDegree(he.corner()) > 0) {
+        GC_SAFETY_ASSERT(normalCoordinates.strictDegree(he.corner()) == 1,
+                         "at most one curve piece per corner at an inserted edge vertex");
+        if (slotA < 0) {
+          slotA = 2 * i + 1;
+          NormalCoordinatesCurve curve = normalCoordinates.topologicalTrace(he.corner(), 0);
+          pieceAInput = std::get<0>(identifyInputCurveRange(curve));
+        } else {
+          GC_SAFETY_ASSERT(slotB < 0, "an inserted edge vertex has exactly two curve pieces");
+          slotB = 2 * i + 1;
+        }
       }
     }
-  }
+    GC_SAFETY_ASSERT(slotA >= 0 && slotB >= 0, "could not find the two curve pieces at an inserted edge vertex");
+    GC_SAFETY_ASSERT(pieceAInput.edge() == loc.edge, "curve piece at an inserted edge vertex must lie along its edge");
 
-  throw std::runtime_error("inputFaceOfUncrossedRegion: found no anchor; "
-                           "the input mesh appears to have no edges");
+    // heOut's slot
+    int slotOut = -1;
+    for (size_t i = 0; i < outgoing.size(); i++) {
+      if (outgoing[i] == heOut) {
+        slotOut = 2 * i;
+        break;
+      }
+    }
+    GC_SAFETY_ASSERT(slotOut >= 0, "heOut must be an outgoing halfedge of its vertex");
+
+    // counterclockwise arc test
+    auto ccwFrom = [&](int s) { return (s - slotA + (int)nSlots) % (int)nSlots; };
+    bool onLeftOfPieceA = ccwFrom(slotOut) < ccwFrom(slotB);
+
+    // pieceAInput travels AWAY from u, so the counterclockwise arc from
+    // piece A (sweeping its left) borders pieceAInput.face()
+    return onLeftOfPieceA ? pieceAInput.face() : pieceAInput.twin().face();
+  }
+  }
+  return Face(); // unreachable
 }
 
 Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedEdge(Edge e) const {
   GC_SAFETY_ASSERT(normalCoordinates[e] == 0, "edge must be uncrossed");
 
-  // Induction: an endpoint strictly inside an input face names it exactly
-  SurfacePoint tail = vertexLocations[e.halfedge().tailVertex()];
-  SurfacePoint tip = vertexLocations[e.halfedge().tipVertex()];
-  if (tail.type == SurfacePointType::Face) return tail.face;
-  if (tip.type == SurfacePointType::Face) return tip.face;
-
-  // Both endpoints lie on input edges/vertices. Within either adjacent
-  // intrinsic face, the region containing e's interior is bounded by the
-  // crossing nearest e along the face's other edges (if any), whose curve
-  // identifies the input face exactly.
-  for (Halfedge he : {e.halfedge(), e.halfedge().twin()}) {
-    if (!he.isInterior()) continue;
-    Halfedge heB = he.next();        // e's region touches heB from its tail
-    Halfedge heC = heB.next();       // ... and heC from its tip
-    if (normalCoordinates[heB.edge()] > 0) {
-      NormalCoordinatesCurve curve;
-      int centerInd;
-      std::tie(curve, centerInd) = normalCoordinates.topologicalTraceBidirectional(heB, 0);
-      return inputFaceBesideCurve(curve, true);
-    }
-    if (normalCoordinates[heC.edge()] > 0) {
-      NormalCoordinatesCurve curve;
-      int centerInd;
-      std::tie(curve, centerInd) =
-          normalCoordinates.topologicalTraceBidirectional(heC, normalCoordinates[heC.edge()] - 1);
-      return inputFaceBesideCurve(curve, false);
-    }
-    if (normalCoordinates[heB.edge()] < 0) return inputHalfedgeAlongShared(heB).face();
-    if (normalCoordinates[heC.edge()] < 0) return inputHalfedgeAlongShared(heC).face();
-  }
-
-  // Both adjacent faces are entirely uncrossed: search the surrounding
-  // uncrossed region for an anchor
-  Halfedge heInt = e.halfedge().isInterior() ? e.halfedge() : e.halfedge().twin();
-  return inputFaceOfUncrossedRegion(heInt.face());
+  // The edge's interior lies in a single input face, which is the wedge
+  // face at either endpoint; deriving it from both ends and checking
+  // agreement validates the correspondence.
+  Face f1 = wedgeInputFace(e.halfedge());
+  Face f2 = wedgeInputFace(e.halfedge().twin());
+  GC_SAFETY_ASSERT(f1 == f2, "endpoints of an uncrossed edge disagree about its containing input face");
+  return f1;
 }
 
 // Identify shared halfedge, throw exception if halfedge is not shared
