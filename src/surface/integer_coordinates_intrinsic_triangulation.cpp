@@ -27,6 +27,45 @@ std::array<T, 3> rotate(const std::array<T, 3>& data) {
 
 inline Vector3 rotate(const Vector3& v) { return {v.y, v.z, v.x}; }
 
+// If pt is a face point with barycentric component(s) numerically equal to
+// zero, reduce it to the equivalent point on the face's edge (one ~zero
+// component) or vertex (two ~zero components). Recording such a point as a
+// face point loses the incidence: consumers which dispatch on the location
+// type (curve tracing, identifyInputCurveRange, common subdivision
+// construction) treat face points as strictly interior.
+SurfacePoint reduceDegenerateFacePoint(const SurfacePoint& pt, double eps = 1e-12) {
+  if (pt.type != SurfacePointType::Face) return pt;
+  Vector3 b = pt.faceCoords;
+
+  int nZero = 0;
+  int iZero = -1;    // index of a ~zero component
+  int iNonzero = -1; // index of a non-~zero component
+  for (int i = 0; i < 3; i++) {
+    if (std::abs(b[i]) < eps) {
+      nZero++;
+      iZero = i;
+    } else {
+      iNonzero = i;
+    }
+  }
+
+  if (nZero == 1) {
+    // On the edge connecting vertices (iZero+1)%3 and (iZero+2)%3, i.e.
+    // along the halfedge starting at vertex (iZero+1)%3
+    Halfedge he = pt.face.halfedge();
+    for (int i = 0; i < (iZero + 1) % 3; i++) he = he.next();
+    double tHe = b[(iZero + 2) % 3] / (b[(iZero + 1) % 3] + b[(iZero + 2) % 3]);
+    return SurfacePoint(he, tHe);
+  }
+  if (nZero == 2) {
+    // At the remaining vertex
+    Halfedge he = pt.face.halfedge();
+    for (int i = 0; i < iNonzero; i++) he = he.next();
+    return SurfacePoint(he.vertex());
+  }
+  return pt;
+}
+
 } // namespace
 
 IntegerCoordinatesIntrinsicTriangulation::IntegerCoordinatesIntrinsicTriangulation(
@@ -1171,7 +1210,7 @@ IntegerCoordinatesIntrinsicTriangulation::computeFaceSplitData(Face f, Vector3 b
     insertionFace = inputFace;
   }
 
-  return {SurfacePoint(insertionFace, insertionBary), counts};
+  return {reduceDegenerateFacePoint(SurfacePoint(insertionFace, insertionBary)), counts};
 }
 
 std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::computeEdgeSplitData(Halfedge he,
@@ -1246,12 +1285,27 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
     }
 
     double tBarySegment = (tBary - tSegmentTail) / (tSegmentTip - tSegmentTail);
+
+    // If the split lands (numerically) exactly on a crossing--e.g. splitting
+    // at a parameter read off from the common subdivision--the new point IS
+    // that crossing: return its location, which is already correctly typed
+    // as a point on the input edge it crosses, rather than reconstructing it
+    // as a face point with a degenerate (~zero) barycentric component.
+    const double segEPS = 1e-12;
+    if (tBarySegment <= segEPS && segmentTail.type == SurfacePointType::Edge) {
+      return std::make_pair(segmentTail, crossingSegment);
+    }
+    if (tBarySegment >= 1. - segEPS && segmentTip.type == SurfacePointType::Edge) {
+      return std::make_pair(segmentTip, crossingSegment);
+    }
+
     Face inputFace = sharedFace(segmentTail, segmentTip);
     Vector3 segmentTailCoords = segmentTail.inFace(inputFace).faceCoords;
     Vector3 segmentTipCoords = segmentTip.inFace(inputFace).faceCoords;
 
     return std::make_pair(
-        SurfacePoint(inputFace, (1 - tBarySegment) * segmentTailCoords + tBarySegment * segmentTipCoords),
+        reduceDegenerateFacePoint(
+            SurfacePoint(inputFace, (1 - tBarySegment) * segmentTailCoords + tBarySegment * segmentTipCoords)),
         crossingSegment);
 
   } else if (normalCoordinates[he.edge()] < 0) {
