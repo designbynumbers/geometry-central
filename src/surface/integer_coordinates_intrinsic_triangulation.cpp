@@ -2300,6 +2300,12 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
   // ==== Remove the vertex
   Face newF = intrinsicMesh->removeVertex(v);
 
+  // removeVertex() returns Face() when it refuses (the vertex link is not a
+  // simple cycle -- removal would create a duplicate edge / non-manifold
+  // configuration; happens in thin/degenerate stars). Bail gracefully, exactly
+  // as removeInsertedBoundaryVertex() guards its collapseEdgeTriangular().
+  if (newF == Face()) return Face();
+
   // ==== Update cached data
   // Edge lengths, normal coordinates, and roundabouts should be okay
   updateFaceBasis(newF);
