@@ -44,7 +44,7 @@ Vector<double> solveScaleFactors(const SparseMatrix<double>& A, const Vector<dou
 } // namespace
 
 ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo,
-                                         size_t nCones) {
+                                         const ConePlacementOptions& opts) {
 
   geo.requireCotanLaplacian();
   geo.requireVertexAngleSums();
@@ -63,7 +63,6 @@ ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeo
 
   // Initialize the anchor (cone) set.
   VertexData<char> isCone(mesh, 0);
-  size_t initialInteriorCones = 0;
   bool hasBoundary = mesh.nBoundaryLoops() > 0;
   if (hasBoundary) {
     // All boundary vertices anchor the flattening (they are not counted as cones).
@@ -85,9 +84,13 @@ ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeo
         }
       }
       isCone[best] = 1;
-      initialInteriorCones = 1;
     }
   }
+
+  // Caller-supplied cones join the anchor set immediately (before any greedy
+  // step), on top of the boundary/auto-seed anchors above.
+  for (Vertex v : opts.initialCones)
+    if (!v.isBoundary()) isCone[v] = 1;
 
   auto buildIsN = [&]() {
     Vector<bool> isN(nV);
@@ -96,11 +99,10 @@ ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeo
     return isN;
   };
 
-  // Greedy: add the vertex of largest |scale factor| until we reach nCones
-  // interior cones.
-  size_t toAdd = (nCones > initialInteriorCones) ? (nCones - initialInteriorCones) : 0;
+  // Greedy: add the vertex of largest |scale factor|, up to opts.maxNewCones
+  // times (or until opts.stopMaxU is satisfied).
   Vector<double> u = solveScaleFactors(A, K, buildIsN());
-  for (size_t it = 0; it < toAdd; it++) {
+  for (size_t it = 0; it < opts.maxNewCones; it++) {
     Vertex best;
     double maxAbs = -1.0;
     for (Vertex v : mesh.vertices()) {
@@ -112,6 +114,7 @@ ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeo
       }
     }
     if (maxAbs < 0.0) break; // no remaining candidate vertex
+    if (opts.stopMaxU > 0.0 && maxAbs < opts.stopMaxU) break; // gate already satisfied
     isCone[best] = 1;
     u = solveScaleFactors(A, K, buildIsN());
   }
@@ -140,10 +143,26 @@ ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeo
   for (Vertex v : mesh.vertices())
     if (!v.isBoundary() && isCone[v]) cones.push_back(v);
 
+  VertexData<double> uField(mesh, 0.0);
+  for (Vertex v : mesh.vertices()) uField[v] = u(vIdx[v]);
+
   geo.unrequireCotanLaplacian();
   geo.unrequireVertexAngleSums();
 
-  return {cones, coneAngles};
+  return {cones, coneAngles, uField};
+}
+
+ConePlacementResult computeConePlacement(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo,
+                                         size_t nCones) {
+  // Reproduce the pre-ConePlacementOptions semantics exactly: nCones counted the
+  // closed-surface auto-seed (if any) toward its total, so the greedy loop only
+  // added nCones - autoSeedCount new cones.
+  bool hasBoundary = mesh.nBoundaryLoops() > 0;
+  size_t autoSeedCount = (!hasBoundary && mesh.eulerCharacteristic() != 0) ? 1 : 0;
+
+  ConePlacementOptions opts;
+  opts.maxNewCones = (nCones > autoSeedCount) ? (nCones - autoSeedCount) : 0;
+  return computeConePlacement(mesh, geo, opts);
 }
 
 } // namespace surface

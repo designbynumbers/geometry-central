@@ -35,13 +35,27 @@ std::tuple<std::unique_ptr<ManifoldSurfaceMesh>, HalfedgeData<Halfedge>> cutAlon
 
 
   // TODO Right now separateEdge() can only handle cutting along a tree, so walk along tree
-  std::queue<Edge> queue;
   EdgeData<char> considered(*mesh, false);
 
-  // find any leaf edge
-  Edge firstEdge;
-  for (Edge e : mesh->edges()) {
-    if (cut[e]) {
+  // A valid cut may be several disjoint trees (e.g. several cone-to-boundary
+  // slits that share no vertex), so repeat until every cut edge has been
+  // processed. Within each tree, prefer to start from a leaf edge that
+  // already touches the mesh boundary and walk inward: every subsequent
+  // separateEdge() call then has exactly one already-boundary endpoint (the
+  // just-extended loop) and one still-interior endpoint, which is always a
+  // supported case (separateEdge's Case 2). Starting from the opposite end
+  // (e.g. an interior cone) instead opens a fresh, separate mini boundary
+  // loop first, which must eventually MERGE with the original boundary loop
+  // to finish the tree -- unimplemented (separateEdge's Case 3). A tree with
+  // no boundary touch point at all (a closed-surface cone-to-cone bridge) has
+  // no such preference to make; any leaf works.
+  while (true) {
+    Edge firstEdge;
+    bool anyUnconsidered = false;
+    for (Edge e : mesh->edges()) {
+      if (!cut[e] || considered[e]) continue;
+      anyUnconsidered = true;
+
       int topCount = 0;
       for (Edge en : e.halfedge().vertex().adjacentEdges()) {
         if (cut[en]) topCount++;
@@ -50,44 +64,53 @@ std::tuple<std::unique_ptr<ManifoldSurfaceMesh>, HalfedgeData<Halfedge>> cutAlon
       for (Edge en : e.halfedge().twin().vertex().adjacentEdges()) {
         if (cut[en]) botCount++;
       }
-      if (topCount == 1 || botCount == 1) {
+      bool boundaryLeaf =
+          (topCount == 1 && e.halfedge().vertex().isBoundary()) ||
+          (botCount == 1 && e.halfedge().twin().vertex().isBoundary());
+      if (boundaryLeaf) {
         firstEdge = e;
-        break;
+        break; // prefer a boundary-touching leaf outright
+      }
+      if (firstEdge == Edge() && (topCount == 1 || botCount == 1)) {
+        firstEdge = e; // remember the first non-boundary leaf as a fallback
       }
     }
-  }
-  if (firstEdge == Edge())
-    throw std::runtime_error("could not find leaf edge. must cut along simple disk tree. see note");
-  queue.emplace(firstEdge);
-  considered[firstEdge] = true;
+    if (!anyUnconsidered) break; // every cut edge has been processed
+    if (firstEdge == Edge())
+      throw std::runtime_error("could not find leaf edge. must cut along simple disk tree. see note");
 
-  // process until queue is empty
-  while (!queue.empty()) {
-    Edge e = queue.front();
-    queue.pop();
+    std::queue<Edge> queue;
+    queue.emplace(firstEdge);
+    considered[firstEdge] = true;
 
-    // Cache to restore after separate
-    Halfedge oldParent = parentHalfedges[e.halfedge()];
-    Halfedge oldParentT = parentHalfedges[e.halfedge().twin()];
+    // process until queue is empty
+    while (!queue.empty()) {
+      Edge e = queue.front();
+      queue.pop();
 
-    Halfedge newHe, newHeOpp;
-    std::tie(newHe, newHeOpp) = mesh->separateEdge(e); // all the hard works happens here
+      // Cache to restore after separate
+      Halfedge oldParent = parentHalfedges[e.halfedge()];
+      Halfedge oldParentT = parentHalfedges[e.halfedge().twin()];
 
-    // Keep the parent map accurate
-    parentHalfedges[newHe] = oldParent;
-    parentHalfedges[newHeOpp] = oldParentT;
+      Halfedge newHe, newHeOpp;
+      std::tie(newHe, newHeOpp) = mesh->separateEdge(e); // all the hard works happens here
 
-    // Add new neighbors for processing
-    for (Edge en : e.halfedge().vertex().adjacentEdges()) {
-      if (cut[en] && !considered[en]) {
-        considered[en] = true;
-        queue.emplace(en);
+      // Keep the parent map accurate
+      parentHalfedges[newHe] = oldParent;
+      parentHalfedges[newHeOpp] = oldParentT;
+
+      // Add new neighbors for processing
+      for (Edge en : e.halfedge().vertex().adjacentEdges()) {
+        if (cut[en] && !considered[en]) {
+          considered[en] = true;
+          queue.emplace(en);
+        }
       }
-    }
-    for (Edge en : e.halfedge().twin().vertex().adjacentEdges()) {
-      if (cut[en] && !considered[en]) {
-        considered[en] = true;
-        queue.emplace(en);
+      for (Edge en : e.halfedge().twin().vertex().adjacentEdges()) {
+        if (cut[en] && !considered[en]) {
+          considered[en] = true;
+          queue.emplace(en);
+        }
       }
     }
   }

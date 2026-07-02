@@ -37,71 +37,69 @@ Vector<double> dirichletSolve(const SparseMatrix<double>& A, const Vector<bool>&
 
 } // namespace
 
-ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
-                                                    IntrinsicGeometryInterface& geo, size_t nCones) {
+ConeParameterizationResult flattenWithGivenConesAndCut(ManifoldSurfaceMesh& mesh, IntrinsicGeometryInterface& geo,
+                                                        const std::vector<Vertex>& cones,
+                                                        const VertexData<double>& coneAngles,
+                                                        const EdgeData<char>& cutEdges) {
 
-  // === 1. Place cones and route geodesic slits to the boundary. ===
-  ConePlacementResult cp = computeConePlacement(mesh, geo, nCones);
-  ConeCutResult cc = computeConeCut(mesh, geo, cp.cones);
+  geo.requireCotanLaplacian();
+  geo.requireVertexAngleSums();
+  geo.requireEdgeLengths();
 
-  ManifoldSurfaceMesh& iMesh = cc.network->mesh; // intrinsic mesh the cut lives on
-  IntrinsicGeometryInterface& iGeo = *cc.network->tri;
-  iGeo.requireCotanLaplacian();
-  iGeo.requireVertexAngleSums();
-  iGeo.requireEdgeLengths();
+  size_t niV = mesh.nVertices();
+  VertexData<size_t> iVIdx = mesh.getVertexIndices();
 
-  size_t niV = iMesh.nVertices();
-  VertexData<size_t> iVIdx = iMesh.getVertexIndices();
-
-  // === 2. Scale-factor field on the UNCUT intrinsic surface, with the cone
-  //        curvature subtracted from the source so curvature concentrates at
-  //        the cones. Boundary scale factors are held at zero. ===
+  // === Scale-factor field on the UNCUT surface, with the cone curvature
+  //     subtracted from the source so curvature concentrates at the cones.
+  //     Boundary scale factors are held at zero. ===
   Vector<double> Kminus(niV); // -(K - C)
-  {
-    // cone angles, transferred to the intrinsic mesh by vertex index
-    VertexData<double> coneAngleI(iMesh, 0.0);
-    for (Vertex c : cp.cones) coneAngleI[iMesh.vertex(c.getIndex())] = cp.coneAngles[c];
-
-    for (Vertex v : iMesh.vertices()) {
-      double base = v.isBoundary() ? M_PI : 2.0 * M_PI;
-      double K = base - iGeo.vertexAngleSums[v];
-      Kminus(iVIdx[v]) = -(K - coneAngleI[v]);
-    }
+  for (Vertex v : mesh.vertices()) {
+    double base = v.isBoundary() ? M_PI : 2.0 * M_PI;
+    double K = base - geo.vertexAngleSums[v];
+    Kminus(iVIdx[v]) = -(K - coneAngles[v]);
   }
   Vector<bool> isInteriorI(niV);
-  for (Vertex v : iMesh.vertices()) isInteriorI(iVIdx[v]) = !v.isBoundary();
+  for (Vertex v : mesh.vertices()) isInteriorI(iVIdx[v]) = !v.isBoundary();
   Vector<double> zeroBdy = Vector<double>::Zero(niV);
-  Vector<double> aUncut = dirichletSolve(iGeo.cotanLaplacian, isInteriorI, Kminus, zeroBdy);
+  Vector<double> aUncut = dirichletSolve(geo.cotanLaplacian, isInteriorI, Kminus, zeroBdy);
 
-  // === 3. Cut the intrinsic mesh into a disk. ===
+  // === Cut the mesh into a disk. ===
   size_t nCutEdges = 0;
-  EdgeData<char> cutChar(iMesh, 0);
-  for (Edge e : iMesh.edges())
-    if (cc.cutEdges[e]) {
-      cutChar[e] = 1;
-      nCutEdges++;
-    }
+  for (Edge e : mesh.edges())
+    if (cutEdges[e]) nCutEdges++;
 
   std::unique_ptr<ManifoldSurfaceMesh> cutMesh;
   HalfedgeData<Halfedge> parentHe;
   if (nCutEdges > 0) {
-    std::tie(cutMesh, parentHe) = cutAlongEdges(iMesh, cutChar);
+    std::tie(cutMesh, parentHe) = cutAlongEdges(mesh, cutEdges);
   } else {
-    cutMesh = iMesh.copy();
+    cutMesh = mesh.copy();
     parentHe = HalfedgeData<Halfedge>(*cutMesh);
-    for (size_t i = 0; i < cutMesh->nHalfedges(); i++) parentHe[i] = iMesh.halfedge(i);
+    for (size_t i = 0; i < cutMesh->nHalfedges(); i++) parentHe[i] = mesh.halfedge(i);
   }
 
-  // For a cut-mesh element, the corresponding intrinsic-mesh halfedge (an
+  if (cutMesh->nBoundaryLoops() != 1) {
+    throw std::runtime_error("flattenWithGivenConesAndCut: cutting `mesh` along `cutEdges` must yield a single "
+                             "topological disk (got " +
+                             std::to_string(cutMesh->nBoundaryLoops()) + " boundary loops)");
+  }
+
+  // For a cut-mesh element, the corresponding pre-cut-mesh halfedge (an
   // interior halfedge, whose parent is set).
   auto parentInterior = [&](Halfedge cutHe) -> Halfedge {
     if (cutHe.isInterior() && parentHe[cutHe] != Halfedge()) return parentHe[cutHe];
     return parentHe[cutHe.twin()];
   };
 
-  // === 4. Transfer scale factors, intrinsic edge lengths and slit pairing onto
-  //        the cut disk. The two sides of a slit share an origin vertex/edge, so
-  //        they receive identical scale factors and a shared seam id. ===
+  // === Transfer scale factors, edge lengths and slit pairing onto the cut
+  //     disk. The two sides of a slit share an origin vertex/edge, so they
+  //     receive identical scale factors and a shared seam id. Also verifies the
+  //     disk-and-cones-on-boundary precondition: every copy of a cone vertex
+  //     must be on the cut boundary (else the cone's prescribed angle deficit
+  //     never reaches the boundary layout, silently producing a wrong shape). ===
+  VertexData<char> isConeOrig(mesh, 0);
+  for (Vertex c : cones) isConeOrig[c] = 1;
+
   size_t ncV = cutMesh->nVertices();
   VertexData<size_t> cVIdx = cutMesh->getVertexIndices();
 
@@ -115,6 +113,10 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
         break;
       }
     }
+    if (!cv.isBoundary() && isConeOrig[origHe.vertex()]) {
+      throw std::runtime_error("flattenWithGivenConesAndCut: a cone vertex has an interior copy after cutting -- "
+                               "`cutEdges` does not fully separate every cone onto the cut boundary");
+    }
     aCut(cVIdx[cv]) = aUncut(iVIdx[origHe.vertex()]);
   }
 
@@ -122,7 +124,7 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
   EdgeData<int> seamId(*cutMesh, -1);
   for (Edge ce : cutMesh->edges()) {
     Halfedge p = parentInterior(ce.halfedge());
-    cutLen[ce] = iGeo.edgeLengths[p.edge()];
+    cutLen[ce] = geo.edgeLengths[p.edge()];
     if (ce.isBoundary()) seamId[ce] = static_cast<int>(p.edge().getIndex());
   }
 
@@ -130,7 +132,7 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
   cutGeom->requireCotanLaplacian();
   cutGeom->requireVertexAngleSums();
 
-  // === 5. Boundary curvatures of the cut disk (the BFF "k - du/dn"). ===
+  // === Boundary curvatures of the cut disk (the BFF "k - du/dn"). ===
   Vector<bool> isInteriorC(ncV);
   for (Vertex v : cutMesh->vertices()) isInteriorC(cVIdx[v]) = !v.isBoundary();
   BlockDecompositionResult<double> decompC = blockDecomposeSquare(cutGeom->cotanLaplacian, isInteriorC);
@@ -150,8 +152,8 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
   }
   Vector<double> ktildeBdy = kBdy - dudn;
 
-  // === 6. Lay out the boundary, with seamless (paired) closure so the two sides
-  //        of each slit get equal length. ===
+  // === Lay out the boundary, with seamless (paired) closure so the two sides
+  //     of each slit get equal length. ===
   // Traverse the single boundary loop in order.
   std::vector<Vertex> loopV;
   std::vector<Edge> loopE; // loopE[k] connects loopV[k] -> loopV[k+1]
@@ -241,7 +243,7 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
     im += L * Ty(k);
   }
 
-  // === 7. Harmonically extend the boundary positions into the interior. ===
+  // === Harmonically extend the boundary positions into the interior. ===
   Vector<double> bdyX = Vector<double>::Zero(ncV), bdyY = Vector<double>::Zero(ncV);
   for (size_t k = 0; k < m; k++) {
     bdyX(cVIdx[loopV[k]]) = posX[k];
@@ -256,10 +258,47 @@ ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
   for (Vertex v : cutMesh->vertices()) {
     result.uvs[v] = Vector2{X(cVIdx[v]), Y(cVIdx[v])};
   }
-  result.cones = cp.cones;
+  result.cones = cones;
   result.boundarySeamId = seamId;
+  result.parentHalfedge = std::move(parentHe);
   result.cutMesh = std::move(cutMesh);
   result.cutGeometry = std::move(cutGeom);
+
+  geo.unrequireCotanLaplacian();
+  geo.unrequireVertexAngleSums();
+  geo.unrequireEdgeLengths();
+
+  return result;
+}
+
+ConeParameterizationResult parameterizeBFFwithCones(ManifoldSurfaceMesh& mesh,
+                                                    IntrinsicGeometryInterface& geo, size_t nCones) {
+
+  // === 1. Place cones and route geodesic slits to the boundary. ===
+  ConePlacementResult cp = computeConePlacement(mesh, geo, nCones);
+  ConeCutResult cc = computeConeCut(mesh, geo, cp.cones);
+
+  ManifoldSurfaceMesh& iMesh = cc.network->mesh; // intrinsic mesh the cut lives on
+  IntrinsicGeometryInterface& iGeo = *cc.network->tri;
+
+  // Cones and their prescribed angles, transferred to the intrinsic mesh by
+  // vertex index (constructFromEdgeSet's triangulation shares mesh's vertex set).
+  std::vector<Vertex> iCones;
+  iCones.reserve(cp.cones.size());
+  VertexData<double> coneAngleI(iMesh, 0.0);
+  for (Vertex c : cp.cones) {
+    Vertex ic = iMesh.vertex(c.getIndex());
+    iCones.push_back(ic);
+    coneAngleI[ic] = cp.coneAngles[c];
+  }
+
+  EdgeData<char> cutChar(iMesh, 0);
+  for (Edge e : iMesh.edges())
+    if (cc.cutEdges[e]) cutChar[e] = 1;
+
+  // === 2-3. Flatten the cut disk with the cones' curvature prescribed. ===
+  ConeParameterizationResult result = flattenWithGivenConesAndCut(iMesh, iGeo, iCones, coneAngleI, cutChar);
+  result.cones = cp.cones; // report on the INPUT mesh, not the intrinsic one
   return result;
 }
 
