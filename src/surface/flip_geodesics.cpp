@@ -221,8 +221,12 @@ std::vector<Halfedge> FlipEdgePath::getHalfedgeList() {
 
 FlipEdgeNetwork::FlipEdgeNetwork(ManifoldSurfaceMesh& mesh_, IntrinsicGeometryInterface& inputGeom,
                                  const std::vector<std::vector<Halfedge>>& hePaths, VertexData<bool> extraMarkedVerts)
-    : tri(std::unique_ptr<SignpostIntrinsicTriangulation>(new SignpostIntrinsicTriangulation(mesh_, inputGeom))),
+    : ownedTri(std::unique_ptr<IntrinsicTriangulation>(new SignpostIntrinsicTriangulation(mesh_, inputGeom))),
+      tri(ownedTri.get()),
       mesh(*(tri->intrinsicMesh)), pathsAtEdge(mesh), isMarkedVertex(mesh, false) {
+
+  // This constructor always owns a signpost triangulation.
+  signpostTri = dynamic_cast<SignpostIntrinsicTriangulation*>(tri);
 
 
   // Build initial paths from the vectors of edges (path constructor updates other structures of this class)
@@ -241,6 +245,40 @@ FlipEdgeNetwork::FlipEdgeNetwork(ManifoldSurfaceMesh& mesh_, IntrinsicGeometryIn
     }
 
     paths.emplace_back(new FlipEdgePath(*this, intPath, isClosed));
+  }
+
+  // Mark any additional verts
+  if (extraMarkedVerts.size() > 0) {
+    for (Vertex v : mesh.vertices()) {
+      if (extraMarkedVerts[v.getIndex()]) {
+        isMarkedVertex[v] = true;
+      }
+    }
+  }
+
+  // Make sure everything is good to go
+  validate();
+}
+
+
+FlipEdgeNetwork::FlipEdgeNetwork(IntrinsicTriangulation& existingTri,
+                                 const std::vector<std::vector<Halfedge>>& hePaths, VertexData<bool> extraMarkedVerts)
+    : ownedTri(nullptr), tri(&existingTri),
+      mesh(*(tri->intrinsicMesh)), pathsAtEdge(mesh), isMarkedVertex(mesh, false) {
+
+  // Borrowed triangulation: use the fast signpost angle path only if it
+  // happens to be a signpost; otherwise the base-quantity path is used and
+  // rewinding is unavailable.
+  signpostTri = dynamic_cast<SignpostIntrinsicTriangulation*>(tri);
+
+  // Build initial paths. Unlike the owning constructor, hePaths are already
+  // halfedges of `mesh` (== existingTri.intrinsicMesh), so they are used
+  // directly with no index remap.
+  for (const std::vector<Halfedge>& hePath : hePaths) {
+    Halfedge firstHe = hePath.front();
+    Halfedge lastHe = hePath.back();
+    bool isClosed = firstHe.vertex() == lastHe.twin().vertex();
+    paths.emplace_back(new FlipEdgePath(*this, hePath, isClosed));
   }
 
   // Mark any additional verts
@@ -330,12 +368,15 @@ std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromPiecewiseDijkstra
 }
 
 
-std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldSurfaceMesh& mesh_,
-                                                                       IntrinsicGeometryInterface& geom,
-                                                                       const EdgeData<bool>& inPath,
-                                                                       const VertexData<bool>& extraMarkedVertices) {
-  ManifoldSurfaceMesh& mesh = mesh_;
+namespace {
 
+// Walk a marked edge set into open paths (between endpoint vertices -- those
+// with != 2 incident path edges, plus any extraMarkedVertices) and closed
+// loops, as sequences of consecutive halfedges. Shared by both
+// constructFromEdgeSet overloads.
+std::vector<std::vector<Halfedge>> inferPathsFromEdgeSet(ManifoldSurfaceMesh& mesh,
+                                                         const EdgeData<bool>& inPath,
+                                                         const VertexData<bool>& extraMarkedVertices) {
   std::vector<std::vector<Halfedge>> allHalfedges;
 
   // Endpoint vertices will be those with != 2 incident path edges
@@ -410,7 +451,26 @@ std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldS
     } while (heCurr != heStart);
   }
 
+  return allHalfedges;
+}
+
+} // namespace
+
+std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(ManifoldSurfaceMesh& mesh_,
+                                                                       IntrinsicGeometryInterface& geom,
+                                                                       const EdgeData<bool>& inPath,
+                                                                       const VertexData<bool>& extraMarkedVertices) {
+  std::vector<std::vector<Halfedge>> allHalfedges = inferPathsFromEdgeSet(mesh_, inPath, extraMarkedVertices);
   return std::unique_ptr<FlipEdgeNetwork>(new FlipEdgeNetwork(mesh_, geom, allHalfedges));
+}
+
+std::unique_ptr<FlipEdgeNetwork> FlipEdgeNetwork::constructFromEdgeSet(IntrinsicTriangulation& existingTri,
+                                                                       const EdgeData<bool>& inPath,
+                                                                       const VertexData<bool>& extraMarkedVertices) {
+  std::vector<std::vector<Halfedge>> allHalfedges =
+      inferPathsFromEdgeSet(*existingTri.intrinsicMesh, inPath, extraMarkedVertices);
+  return std::unique_ptr<FlipEdgeNetwork>(
+      new FlipEdgeNetwork(existingTri, allHalfedges, extraMarkedVertices));
 }
 
 
@@ -504,38 +564,89 @@ double FlipEdgeNetwork::minAngleIsotopy() {
   return minAngle;
 }
 
+namespace {
+
+// Un-rescaled interior angle at he.vertex() in he.face(), from the triangle's
+// three intrinsic edge lengths (law of cosines).
+double cornerAngleFromLengths(const EdgeData<double>& edgeLengths, Halfedge he) {
+  double a = edgeLengths[he.edge()];               // v -> next vertex
+  double b = edgeLengths[he.next().next().edge()]; // prev vertex -> v
+  double c = edgeLengths[he.next().edge()];         // opposite edge
+  double cosV = (a * a + b * b - c * c) / (2.0 * a * b);
+  if (cosV < -1.0) cosV = -1.0;
+  if (cosV > 1.0) cosV = 1.0;
+  return std::acos(cosV);
+}
+
+// CCW corner-angle sweep around v = hStart.vertex(), from outgoing halfedge
+// hStart to outgoing halfedge hEnd, summing un-rescaled corner angles. Returns
+// +inf if the orbit reaches a boundary gap (a non-interior halfedge) before
+// arriving at hEnd -- matching the signpost convention that a wedge spanning
+// the boundary is infinitely wide. The CCW orbit step he -> he.next().next()
+// .twin() is the same one gc uses to lay out halfedgeVectorsInVertex.
+double ccwAngleSweep(const EdgeData<double>& edgeLengths, Halfedge hStart, Halfedge hEnd) {
+  double sum = 0.0;
+  Halfedge h = hStart;
+  for (size_t guard = 0; guard < 1000000; guard++) {
+    if (h == hEnd) return sum;
+    if (!h.isInterior()) return std::numeric_limits<double>::infinity();
+    sum += cornerAngleFromLengths(edgeLengths, h);
+    h = h.next().next().twin();
+  }
+  return std::numeric_limits<double>::infinity();
+}
+
+} // namespace
+
 std::tuple<double, double> FlipEdgeNetwork::measureSideAngles(Halfedge hePrev, Halfedge heNext) {
   Vertex v = heNext.vertex();
-  double s = tri->vertexAngleSums[v];
 
-  double angleIn = tri->signpostAngle[hePrev.twin()];
-  double angleOut = tri->signpostAngle[heNext];
-  bool isBoundary = v.isBoundary();
+  if (signpostTri != nullptr) {
+    // Fast path: a signpost triangulation maintains per-halfedge angles
+    // incrementally, so the two side wedges are simple angle differences.
+    double s = signpostTri->vertexAngleSums[v];
+    double angleIn = signpostTri->signpostAngle[hePrev.twin()];
+    double angleOut = signpostTri->signpostAngle[heNext];
+    bool isBoundary = v.isBoundary();
 
-  // Compute right angle
-  double rightAngle;
-  if (angleIn < angleOut) {
-    rightAngle = angleOut - angleIn;
-  } else {
-    if (isBoundary) {
-      rightAngle = std::numeric_limits<double>::infinity();
+    // Compute right angle
+    double rightAngle;
+    if (angleIn < angleOut) {
+      rightAngle = angleOut - angleIn;
     } else {
-      rightAngle = (s - angleIn) + angleOut;
+      if (isBoundary) {
+        rightAngle = std::numeric_limits<double>::infinity();
+      } else {
+        rightAngle = (s - angleIn) + angleOut;
+      }
     }
+
+    // Compute left angle
+    double leftAngle;
+    if (angleOut < angleIn) {
+      leftAngle = angleIn - angleOut;
+    } else {
+      if (isBoundary) {
+        leftAngle = std::numeric_limits<double>::infinity();
+      } else {
+        leftAngle = (s - angleOut) + angleIn;
+      }
+    }
+
+    return std::tuple<double, double>{leftAngle, rightAngle};
   }
 
-  // Compute left angle
-  double leftAngle;
-  if (angleOut < angleIn) {
-    leftAngle = angleIn - angleOut;
-  } else {
-    if (isBoundary) {
-      leftAngle = std::numeric_limits<double>::infinity();
-    } else {
-      leftAngle = (s - angleOut) + angleIn;
-    }
-  }
-
+  // Base path (e.g. a borrowed IntegerCoordinatesIntrinsicTriangulation): no
+  // maintained signpost angles. The two side wedges are the CCW corner-angle
+  // sweeps between the incoming and outgoing path halfedges, computed locally
+  // from edge lengths. This is O(degree) per call and edge lengths are
+  // maintained O(1) per flip -- unlike the global halfedgeVectorsInVertex
+  // cache, which would be O(n) to rebuild after every flip. The result is
+  // identical to the signpost formula above (which itself reduces to these
+  // same CCW sweeps, mod the vertex angle sum).
+  const EdgeData<double>& edgeLengths = tri->edgeLengths;
+  double rightAngle = ccwAngleSweep(edgeLengths, hePrev.twin(), heNext);
+  double leftAngle = ccwAngleSweep(edgeLengths, heNext, hePrev.twin());
   return std::tuple<double, double>{leftAngle, rightAngle};
 }
 
@@ -810,10 +921,17 @@ void FlipEdgeNetwork::locallyShortenAt(FlipPathSegment& pathSegment, SegmentAngl
 
       // Gather values for the edge to be flipped
       Edge currEdge = sCurr.edge();
-      double oldLen = tri->edgeLengths[currEdge]; // old values are used for rewinding
-      double oldAngleA = tri->signpostAngle[currEdge.halfedge()];
-      double oldAngleB = tri->signpostAngle[currEdge.halfedge().twin()];
-      bool oldIsOrig = tri->edgeIsOriginal[currEdge];
+
+      // Capture pre-flip state needed to rewind. This is signpost-only state,
+      // so it is read only when rewinding is on (which requires signpostTri).
+      double oldLen = 0., oldAngleA = 0., oldAngleB = 0.;
+      bool oldIsOrig = false;
+      if (supportRewinding) {
+        oldLen = tri->edgeLengths[currEdge];
+        oldAngleA = signpostTri->signpostAngle[currEdge.halfedge()];
+        oldAngleB = signpostTri->signpostAngle[currEdge.halfedge().twin()];
+        oldIsOrig = signpostTri->edgeIsOriginal[currEdge];
+      }
 
       // Try to flip the edge. Note that flipping will only be possible iff \beta < \pi as in the formal algorithm
       // statement
@@ -955,6 +1073,12 @@ void FlipEdgeNetwork::processSingleEdgeLoop(FlipPathSegment& pathSegment, Segmen
 }
 
 void FlipEdgeNetwork::iterativeShorten(size_t maxIterations, double maxRelativeLengthDecrease) {
+
+  if (supportRewinding && signpostTri == nullptr) {
+    throw std::runtime_error(
+        "FlipEdgeNetwork: supportRewinding requires a SignpostIntrinsicTriangulation, but this network borrows a "
+        "non-signpost triangulation. Set supportRewinding=false.");
+  }
 
   bool checkLength = maxRelativeLengthDecrease != 0;
   double initLength = -777;
@@ -1290,6 +1414,11 @@ void FlipEdgeNetwork::rewind() {
     throw std::runtime_error(
         "Called FlipEdgeNetwork::rewind(), but rewinding is not supported. Set supportRewinding=true on construction.");
   }
+  if (signpostTri == nullptr) {
+    throw std::runtime_error(
+        "FlipEdgeNetwork::rewind() requires a SignpostIntrinsicTriangulation; rewinding is not supported on a borrowed "
+        "non-signpost triangulation.");
+  }
 
   // TODO in theory, we might want to separate out the idea of undoing a sequence of flips, and of clearing the
   // represented paths. Right now this function always does both.
@@ -1323,7 +1452,7 @@ void FlipEdgeNetwork::rewind() {
 
     // Undo the flip
     // bool flipped = tri->flipEdgeIfPossible(edge, 0.);
-    tri->flipEdgeManual(edge, oldLen, oldAngleA, oldAngleB, isOrig, true);
+    signpostTri->flipEdgeManual(edge, oldLen, oldAngleA, oldAngleB, isOrig, true);
   }
 }
 
@@ -1721,8 +1850,14 @@ void FlipEdgeNetwork::savePathOBJLine(std::string filenamePrefix, bool withAll) 
 }
 
 bool FlipEdgeNetwork::intrinsicTriIsOriginal() {
+  // edgeIsOriginal is signpost-only bookkeeping. On a borrowed non-signpost
+  // triangulation we cannot answer this, so report "original" (the network
+  // never relies on this for correctness -- it is a viz/diagnostic query).
+  if (signpostTri == nullptr) {
+    return true;
+  }
   for (Edge e : mesh.edges()) {
-    if (!tri->edgeIsOriginal[e]) {
+    if (!signpostTri->edgeIsOriginal[e]) {
       return false;
     }
   }
