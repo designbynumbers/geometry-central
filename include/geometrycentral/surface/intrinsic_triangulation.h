@@ -95,6 +95,10 @@ public:
   // it is needed. The intrinsic triangulation manages the lifetime of the subdivision---it will be deallocated if (a)
   // this object is deleted, or (b) the triangulation is mutated, invalidating the common subdivision. Be sure to copy
   // it if you want to retain it through those operations.
+  // WARNING: constructing the subdivision compresses the intrinsic mesh, which INVALIDATES all
+  // intrinsic element handles (Vertex/Edge/Face/...) held by the caller. Re-acquire any handles
+  // after calling this (sample them afterwards, or store indices/positions instead), exactly as
+  // after an explicit mesh.compress().
   CommonSubdivision& getCommonSubdivision();
 
   // Given a point on the input triangulation, returns the corresponding point on the intrinsic triangulation
