@@ -116,6 +116,9 @@ public:
   // halves terminate there, and the vertex's location is recorded as a
   // point ON the corresponding input edge. This is the principled way to
   // obtain an intrinsic vertex lying on an input edge at a chosen crossing.
+  // Returns Vertex() (refusal) if the cut would create a nonpositive-,
+  // near-zero- (see insertionMinEdgeLength), or nonfinite-length edge,
+  // i.e. when the crossing lies numerically at an existing vertex.
   Vertex insertVertexAtCrossing(Halfedge he, int crossingIndex, bool verbose = false);
 
   Vertex splitFace(Face f, Vector3 bary, bool verbose = false);

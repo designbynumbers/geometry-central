@@ -2216,6 +2216,18 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertexAtCrossing(Halfedge
   newEdgeLengths[2] = displacementLength(heBary(e.halfedge(), bary) - heBary(e.halfedge().next(), 1),
                                          faceEdgeLengths(e.halfedge().face()));
 
+  // Refuse cuts which would create a nonpositive-, near-zero-, or
+  // nonfinite-length intrinsic edge -- the same geometric refusal
+  // insertVertex() applies (see insertionMinEdgeLength). This happens when
+  // the crossing lies numerically at an existing vertex (e.g. after other
+  // degenerate-but-valid insertions nearby): the cut cannot be represented
+  // with positive-length elements, so the caller keeps the uncut curve.
+  for (double len : newEdgeLengths) {
+    if (!(len > 0.) || !std::isfinite(len) || len < insertionMinEdgeLength) {
+      return Vertex();
+    }
+  }
+
   Halfedge newHalfedge = intrinsicMesh->splitEdgeTriangular(e);
   Vertex newVertex = newHalfedge.vertex();
   vertexLocations[newVertex] = inputPoint;
