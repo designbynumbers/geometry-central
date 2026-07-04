@@ -737,6 +737,155 @@ TEST_F(IntrinsicInsertionSuite, BoundaryInsertDelete) {
   EXPECT_EQ(checkCS(tri, origGeometry), "");
 }
 
+// Regression test (downstream garment-pipeline report,
+// surfacepoint-ambiguous-classification): removing an inserted vertex
+// erases the three spokes of its degree-3 star, and with them any curve
+// crossings recorded there. Erasing spoke crossings is fine as long as the
+// curve still enters and leaves the merged face through its outer edges --
+// but if a curve component's crossings interior to the merged face lie
+// ONLY on spokes (a curve running corner-to-corner between two on-curve
+// vertices, e.g. seam vertices inserted on an input edge), the curve would
+// become a corner-to-corner chord of the merged face, which normal
+// coordinates cannot express: the component silently vanishes and the
+// roundabouts at the merged face's corners go stale by one, corrupting
+// every later roundabout-anchored derivation (identifyInputEdge,
+// wedgeInputFace). removeInsertedVertex must refuse exactly these removals
+// (returning Face()); every removal it does perform must leave a fully
+// valid triangulation. In the wild the trigger was a seam-insertion +
+// straighten + delaunayRefine pipeline: refinement inserted a cascade
+// vertex recorded numerically ON an input edge (bary <0.5, 4.5e-22, 0.5>)
+// and deleteNearbyVertices removed a neighbor whose spokes carried the
+// whole inter-seam-vertex curve segment.
+//
+// The chord state cannot arise from exact geometry -- every operation
+// sequence that would produce it contains a flip refused by the signed-
+// area check. It arises exactly when floating point makes a borderline
+// choice: a vertex numerically ON the curve, where each individual choice
+// is legal but the removal's flip-to-degree-3 reduction can strand the
+// inter-seam-vertex curve piece on spokes. So we manufacture the seam
+// scenario at its degenerate limit:
+//   1. split a shared edge twice -> consecutive seam vertices u, s joined
+//      by a shared sub-edge; the curve piece u->s runs along it;
+//   2. insert v as a Face-point numerically ON the input edge between
+//      them (the wild record: bary <0.5, 4.5e-22, 0.5>);
+//   3. flip the u-s sub-edge -- geometrically legal, but the curve piece
+//      u->s must be re-expressed around v: the float-ambiguous choice;
+//   4. remove v (then u, s), validating after every attempt.
+// (The full wild trigger needs garment-scale float coincidences which no
+// distilled construction reached -- gc's own flip/split bookkeeping
+// resolves each of these ambiguities consistently. This test pins that
+// behavior; the conservation-law guard inside removeInsertedVertex is
+// exercised at scale by the downstream repro, where it takes 15 corrupting
+// removals to 0.)
+TEST_F(IntrinsicInsertionSuite, RemoveVertexBesideCurveChord) {
+  for (const MeshAsset& a : {getAsset("fox.ply", true), getAsset("spot.ply", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+    ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+
+    // Cycle the off-edge barycentric component across sites (the wild
+    // trigger was 4.5e-22 -- the ambiguity lives far below any geometric
+    // epsilon)
+    const std::vector<double> etas = {4.5e-22, 1e-18, 1e-15, 0., 1e-12};
+
+    int nSites = 0, nRemoved = 0, nRefused = 0, nAttempts = 0;
+    size_t nOrigEdges = im.nEdges();
+    for (size_t iE = 0; iE < nOrigEdges && nSites < 15; iE += 7) {
+      Edge e = im.edge(iE);
+      if (tri.normalCoordinates[e] != -1 || e.isBoundary()) continue;
+
+      // 1. Two consecutive seam vertices on the input edge
+      Vertex u = tri.splitEdge(e, 0.5);
+      ASSERT_NE(u, Vertex());
+      if (tri.vertexLocations[u].type != SurfacePointType::Edge) continue;
+      Edge eSub;
+      for (Edge ve : u.adjacentEdges()) {
+        if (tri.normalCoordinates[ve] == -1 && !ve.isBoundary()) {
+          eSub = ve;
+          break;
+        }
+      }
+      if (eSub == Edge()) continue;
+      Vertex s = tri.splitEdge(eSub, 0.5);
+      ASSERT_NE(s, Vertex());
+      if (tri.vertexLocations[s].type != SurfacePointType::Edge) continue;
+      Edge eMid;
+      for (Halfedge he : u.outgoingHalfedges()) {
+        if (he.tipVertex() == s && tri.normalCoordinates[he.edge()] == -1) eMid = he.edge();
+      }
+      if (eMid == Edge() || eMid.isBoundary()) continue;
+
+      // 2. Insert v as a Face-point numerically ON the input edge between
+      // the seam vertices (the wild record was bary <0.5, 4.5e-22, 0.5>)
+      Face fIns = eMid.halfedge().face();
+      Vertex apex; // the corner of fIns which is not u or s
+      double eta = etas[nSites % etas.size()];
+      Vector3 bary = Vector3::zero();
+      {
+        int iC = 0;
+        for (Vertex cV : fIns.adjacentVertices()) {
+          if (cV == u) {
+            bary[iC] = 0.5;
+          } else if (cV == s) {
+            bary[iC] = 0.5 - eta;
+          } else {
+            apex = cV;
+            bary[iC] = eta;
+          }
+          iC++;
+        }
+      }
+      size_t nVBefore = im.nVertices();
+      Vertex v = tri.insertVertex(SurfacePoint(fIns, bary));
+      if (v == Vertex() || im.nVertices() == nVBefore) continue; // insertion refused
+      if (tri.vertexLocations[v].type == SurfacePointType::Vertex) continue;
+
+      // 3. Flip the seam sub-edge u-s. Geometrically this is fine (v lies
+      // numerically ON the segment u-s, the quad is only degenerate at v);
+      // combinatorially the curve piece u->s must be re-expressed around
+      // (or through) v -- exactly the float-ambiguous choice. Any choice
+      // must leave a valid triangulation.
+      if (!tri.flipEdgeIfPossible(eMid)) continue;
+      nSites++;
+      try {
+        tri.validate();
+      } catch (std::exception& err) {
+        ADD_FAILURE() << "validate() failed after flipping the seam sub-edge beside v (site " << nSites
+                      << ", eta = " << eta << "): " << err.what();
+        return;
+      }
+
+      // 4. Remove the inserted vertices again. Every attempt must either
+      // be refused or leave a fully valid triangulation -- in particular
+      // the curve piece u->s must never be silently erased.
+      for (Vertex cand : {v, u, s, apex}) {
+        if (cand.isDead() || tri.vertexLocations[cand].type == SurfacePointType::Vertex) continue;
+        nAttempts++;
+        Face fMerged = tri.removeInsertedVertex(cand);
+        if (fMerged == Face()) {
+          nRefused++;
+        } else {
+          nRemoved++;
+        }
+        try {
+          tri.validate();
+        } catch (std::exception& err) {
+          ADD_FAILURE() << "validate() failed after remove attempt of " << cand << " (site " << nSites << ", eta "
+                        << eta << ", " << (fMerged == Face() ? "refused" : "removed") << "): " << err.what();
+          return;
+        }
+      }
+    }
+    std::cout << "  " << nSites << " sites, " << nAttempts << " remove attempts: " << nRemoved << " removed, "
+              << nRefused << " refused" << std::endl;
+    EXPECT_GT(nSites, 0);
+    EXPECT_EQ(checkCS(tri, origGeometry), "");
+  }
+}
+
 // Regression test: tracing an input edge through an inserted vertex must
 // scan the vertex's whole fan of corners for the curve's continuation.
 // traceNextCurve used to throw on the first corner with no crossing, which
@@ -792,6 +941,54 @@ TEST_F(IntrinsicInsertionSuite, TraceThroughInsertedVertexAfterFlips) {
   }
   EXPECT_GT(nIsolated, 0); // at least one vertex is in the regression configuration
   EXPECT_EQ(checkCS(tri, origGeometry), "");
+}
+
+// Companion to RemoveVertexBesideCurveChord, at pipeline scale: the wild
+// trigger's shape end to end -- seam vertices along many input edges
+// (level-set-seam-like), straightening flips, then delaunayRefine, whose
+// internal deleteNearbyVertices removes cascade vertices near the seams
+// (the exact call path of the downstream failure). The triangulation and
+// common subdivision must come out fully valid.
+TEST_F(IntrinsicInsertionSuite, SeamRefineDelete) {
+  for (const MeshAsset& a : {getAsset("spot.ply", true), getAsset("lego.ply", true), getAsset("fox.ply", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    for (unsigned seed = 0; seed < 5; seed++) {
+      IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+      ManifoldSurfaceMesh& im = *tri.intrinsicMesh;
+      std::mt19937 rng(seed);
+      std::uniform_real_distribution<double> unit(0.15, 0.85);
+
+      // Seam vertices along many input edges (level-set-seam-like)
+      size_t nOrigEdges = im.nEdges();
+      int nSeam = 0;
+      for (size_t iE = seed; iE < nOrigEdges; iE += 3) {
+        Edge e = im.edge(iE);
+        if (tri.normalCoordinates[e] != -1) continue;
+        Vertex u = tri.splitEdge(e, unit(rng));
+        if (u != Vertex()) nSeam++;
+      }
+      ASSERT_GT(nSeam, 0);
+
+      // Straighten: push toward Delaunay (flips shared sub-edges away)
+      tri.flipToDelaunay();
+
+      // Refine: inserts circumcenters (cascades near the seam vertices)
+      // and deletes nearby cascade vertices again
+      tri.delaunayRefine(25.);
+
+      try {
+        tri.validate();
+      } catch (std::exception& err) {
+        ADD_FAILURE() << "validate() failed after seam+refine, seed " << seed << ": " << err.what();
+        return;
+      }
+      std::string csErr = checkCS(tri, origGeometry);
+      EXPECT_EQ(csErr, "") << "seed " << seed;
+    }
+  }
 }
 
 TEST_F(IntrinsicInsertionSuite, ClosedMeshProbe) {

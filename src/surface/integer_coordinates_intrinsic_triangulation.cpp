@@ -2297,6 +2297,41 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
     return Face();
   }
 
+  // === Refuse removals which the normal coordinates cannot express
+  //
+  // Replacing the degree-3 star with a single face erases the star's three
+  // spokes, along with any curve crossings recorded on them. That is only
+  // valid if the curve system through the star stays representable on the
+  // merged face: at each corner of the merged face, the strict emanation
+  // count derived from the merged face's (unchanged) outer edge coordinates
+  // must equal everything the deleted spoke used to account for there --
+  // the two old corners' strict degrees plus one if the spoke itself was
+  // shared with an input edge. If a curve would connect two corners of the
+  // merged face while crossing only deleted spokes (e.g. an input edge
+  // passing epsilon-beside the removed vertex), that identity fails: the
+  // curve would become an invisible corner-to-corner chord, its chain
+  // would silently break, and the roundabouts at the merged face's
+  // original corners would go stale by one -- corrupting every later
+  // roundabout-anchored derivation (identifyInputEdge, wedgeInputFace).
+  // Refusing keeps the triangulation valid; callers already handle
+  // refusal (delaunayRefine simply keeps the vertex).
+  for (Halfedge heS : v.outgoingHalfedges()) {
+    // corner of the merged face at t = heS.tipVertex():
+    //   adjacent outer edges: oA (in face(heS)), oB (in face(heS.twin()))
+    //   opposite outer edge: oC (the third one)
+    Edge spoke = heS.edge();
+    Edge oA = heS.next().edge();
+    Edge oB = heS.twin().next().next().edge();
+    Edge oC = heS.next().next().twin().next().edge();
+    size_t sdMerged = strictDegree(normalCoordinates[oC], normalCoordinates[oA], normalCoordinates[oB]);
+    size_t sdA = normalCoordinates.strictDegree(heS.next().corner());
+    size_t sdB = normalCoordinates.strictDegree(heS.twin().corner());
+    size_t deltaSpoke = (normalCoordinates[spoke] < 0) ? 1 : 0;
+    if (sdMerged != sdA + sdB + deltaSpoke) {
+      return Face();
+    }
+  }
+
   // ==== Remove the vertex
   Face newF = intrinsicMesh->removeVertex(v);
 
