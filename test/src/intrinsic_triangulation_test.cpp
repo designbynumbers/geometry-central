@@ -337,6 +337,131 @@ TEST_F(IntrinsicTriangulationSuite, IntegerRefine) {
   }
 }
 
+// === Refinement robustness: delaunayRefine() must always return in finite time, and its
+// === DelaunayRefinementResult must faithfully report what happened.
+
+TEST_F(IntrinsicTriangulationSuite, RefineResultConverged) {
+  for (const MeshAsset& a : {getAsset("fox.ply", true), getAsset("cat_head.obj", true)}) {
+    a.printThyName();
+    ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+    VertexPositionGeometry& origGeometry = *a.geometry;
+
+    IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+    DelaunayRefinementResult result = tri.delaunayRefine();
+
+    EXPECT_TRUE(result.completed);
+    EXPECT_TRUE(result.success());
+    EXPECT_TRUE(result.unrefinedFaces.empty());
+    EXPECT_FALSE(result.reachedInsertionBudget);
+    EXPECT_FALSE(result.flipBudgetExhausted);
+    EXPECT_FALSE(result.stallDetected);
+    EXPECT_GT(result.nInsertions, 0);
+    EXPECT_GT(result.nFlips, 0);
+
+    // The report must agree with reality
+    EXPECT_TRUE(tri.isDelaunay());
+    EXPECT_GE(tri.minAngleDegrees(), 25);
+  }
+}
+
+TEST_F(IntrinsicTriangulationSuite, RefineResultInsertionBudget) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  // fox.ply needs many more than 3 insertions at default settings (see RefineResultConverged)
+  DelaunayRefinementResult result =
+      tri.delaunayRefine(25., std::numeric_limits<double>::infinity(), 3);
+
+  EXPECT_TRUE(result.reachedInsertionBudget);
+  EXPECT_EQ(result.nInsertions, 3);
+  EXPECT_FALSE(result.completed);
+  EXPECT_FALSE(result.success());
+  EXPECT_FALSE(result.unrefinedFaces.empty());
+}
+
+// Regression test for a deterministic non-termination bug: when insertVertex() snaps the
+// requested circumcenter onto a pre-existing vertex (see insertionMinEdgeLength), the old
+// refinement loop counted the no-op as a successful insertion and re-queued the same bad
+// face with unchanged state, spinning forever. With a huge snap radius every insertion is
+// a no-op, so this test hangs unless snaps are reported as refusals.
+TEST_F(IntrinsicTriangulationSuite, RefineSnapNoOpDoesNotSpin) {
+  auto a = getAsset("cat_head.obj", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  double meanLen = 0.;
+  for (Edge e : tri.mesh.edges()) meanLen += tri.edgeLengths[e];
+  meanLen /= tri.mesh.nEdges();
+  tri.insertionMinEdgeLength = 10. * meanLen; // every requested insertion snaps
+
+  DelaunayRefinementResult result = tri.delaunayRefine();
+
+  EXPECT_EQ(result.nInsertions, 0);
+  EXPECT_GT(result.nRefusedInsertions, 0);
+  EXPECT_FALSE(result.success());
+  EXPECT_FALSE(result.unrefinedFaces.empty()); // cat_head genuinely needs refinement
+}
+
+// The insertion length floor (packing guard): with an absurdly high floor, insertions are
+// refused rather than looping, and the refused faces are reported.
+TEST_F(IntrinsicTriangulationSuite, RefineLengthFloorRefusalsReported) {
+  auto a = getAsset("cat_head.obj", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.refinementMinRelativeLength = 100.; // floor far above any realistic new edge
+
+  DelaunayRefinementResult result = tri.delaunayRefine();
+
+  EXPECT_GT(result.nRefusedInsertions, 0);
+  EXPECT_FALSE(result.success());
+  EXPECT_FALSE(result.unrefinedFaces.empty());
+}
+
+// Ask for an angle bound above the 30-degree termination guarantee: no promise the goals
+// are met, but the call must return in finite time with a coherent report.
+TEST_F(IntrinsicTriangulationSuite, RefineAggressiveAngleTerminates) {
+  auto a = getAsset("cat_head.obj", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  DelaunayRefinementResult result =
+      tri.delaunayRefine(33., std::numeric_limits<double>::infinity(), 2000);
+
+  // Whatever happened, the report must be coherent: an early exit is flagged, and
+  // success means the criterion really holds everywhere.
+  EXPECT_TRUE(result.completed || result.reachedInsertionBudget || result.flipBudgetExhausted);
+  if (result.success()) {
+    EXPECT_TRUE(tri.isDelaunay());
+  } else {
+    EXPECT_TRUE(!result.completed || !result.unrefinedFaces.empty());
+  }
+}
+
+TEST_F(IntrinsicTriangulationSuite, SignpostRefineResultConverged) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  SignpostIntrinsicTriangulation tri(mesh, origGeometry);
+
+  DelaunayRefinementResult result = tri.delaunayRefine();
+
+  EXPECT_TRUE(result.success());
+  EXPECT_GT(result.nInsertions, 0);
+  EXPECT_TRUE(tri.isDelaunay());
+  EXPECT_GE(tri.minAngleDegrees(), 25);
+}
+
 TEST_F(IntrinsicTriangulationSuite, SignpostCommonSubdivision) {
   for (const MeshAsset& a : {getAsset("fox.ply", true), getAsset("cat_head.obj", true)}) {
     a.printThyName();

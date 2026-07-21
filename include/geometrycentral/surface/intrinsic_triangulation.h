@@ -26,6 +26,46 @@ namespace surface {
 // See the SIGGRAPH 2021 Course "Geometry Processing with Intrinsic Triangulations" by Nicholas Sharp, Mark Gillespie,
 // and Keenan Crane for an introduction to these techniques.
 
+// Result of delaunayRefine(). The refinement loop is guaranteed to return in
+// finite time; this struct reports how it terminated and what, if anything, was
+// left unrefined, so callers can decide how to proceed (e.g. accept the partial
+// result, relax thresholds, or repair the input near the reported faces).
+struct DelaunayRefinementResult {
+
+  // The loop ran to natural completion (all work queues drained). If false, one
+  // of the flags below explains the early exit.
+  bool completed = false;
+
+  // Terminated early because maxInsertions was reached.
+  bool reachedInsertionBudget = false;
+
+  // Terminated early because the internal edge-flip budget was exhausted. This
+  // indicates numerical inconsistency in the floating-point Delaunay test (a
+  // flip cycle); the mesh may not be fully Delaunay.
+  bool flipBudgetExhausted = false;
+
+  // An insert/delete cycle was detected (many insertions with no net growth in
+  // vertex count), and vertex deletion was disabled for the remainder of the
+  // call to restore guaranteed progress. Informational: the result is still
+  // valid, though it may have somewhat more vertices than otherwise.
+  bool stallDetected = false;
+
+  // Statistics.
+  size_t nFlips = 0;
+  size_t nInsertions = 0;        // vertices successfully inserted
+  size_t nDeletions = 0;         // previously-inserted vertices removed (Chew's algorithm)
+  size_t nRefusedInsertions = 0; // insertions refused by robustness guards: the new vertex
+                                 // would have minted a degenerate or below-floor edge,
+                                 // snapped onto an existing vertex, or failed to trace
+
+  // Faces which still violate the refinement criterion on exit. Handles are
+  // valid until the next mutation/compression of the intrinsic mesh.
+  std::vector<Face> unrefinedFaces;
+
+  // All goals met: completed normally with no face violating the criterion.
+  bool success() const { return completed && unrefinedFaces.empty(); }
+};
+
 class IntrinsicTriangulation : public EdgeLengthGeometry {
 
 public:
@@ -73,6 +113,26 @@ public:
 
   // Parameters
   double triangleTestEPS = 1e-6; // used for numerical checks in mesh operations
+
+  // === Robustness / termination controls for delaunayRefine().
+  //
+  // Insertion length floor (packing guard): refinement refuses to insert a
+  // vertex whose shortest incident edge would be below
+  //   refinementMinRelativeLength * min(shortest edge at call time, circumradiusThresh).
+  // In exact arithmetic Chew's algorithm never shrinks the shortest edge (for
+  // angle bounds <= 30 degrees), so a generous relative floor only triggers
+  // when floating-point error or unrefinable input (e.g. tiny cone angles or
+  // sharp fixed-edge wedges) has broken the termination argument; the offending
+  // faces are reported in DelaunayRefinementResult::unrefinedFaces instead of
+  // looping forever. Set to 0 to disable the guard.
+  double refinementMinRelativeLength = 1e-3;
+
+  // Stall guard: if this many consecutive insertions produce no net growth in
+  // vertex count, refinement concludes it is in an insert/delete cycle
+  // (numerics have broken Chew's spacing argument locally) and disables the
+  // delete-nearby-vertices optimization for the remainder of the call, so that
+  // every further insertion makes strict progress. Set to 0 to disable.
+  size_t refinementStallWindow = 100;
 
 
   // ======================================================
@@ -159,19 +219,30 @@ public:
 
   // Perform intrinsic Delaunay refinement the intrinsic triangulation until it simultaneously:
   //   - satisfies the intrinsic Delaunay criterion
-  //   - has no angles smaller than `angleThreshDegrees` (values > 30 degrees may not terminate)
+  //   - has no angles smaller than `angleThreshDegrees` (values > 30 degrees have no
+  //     termination guarantee even in exact arithmetic)
   //   - has no triangles larger than `circumradiusThresh`
-  // Terminates no matter what after maxInsertions insertions (infinite by default)
-  void delaunayRefine(double angleThreshDegrees = 25.,
-                      double circumradiusThresh = std::numeric_limits<double>::infinity(),
-                      size_t maxInsertions = INVALID_IND);
+  // Terminates no matter what after maxInsertions insertions (infinite by default).
+  //
+  // Always returns in finite time: when the goals cannot be met (numerical
+  // trouble, unrefinable input corners, budget), the robustness guards (see
+  // refinementMinRelativeLength / refinementStallWindow above) stop the loop
+  // and the returned DelaunayRefinementResult reports what happened and which
+  // faces remain unrefined, rather than iterating forever.
+  DelaunayRefinementResult delaunayRefine(double angleThreshDegrees = 25.,
+                                          double circumradiusThresh = std::numeric_limits<double>::infinity(),
+                                          size_t maxInsertions = INVALID_IND);
 
 
   // General version of intrinsic Delaunay refinement, taking a function which will be called
   // to determine if a triangle should be refined.
-  // Will return only when all triangles pass this function, or maxInsertions is exceeded, so
-  // be sure to chose arguments such that the function terminates.
-  void delaunayRefine(const std::function<bool(Face)>& shouldRefine, size_t maxInsertions = INVALID_IND);
+  // Returns when all triangles pass this function, when maxInsertions is exceeded, or when
+  // the robustness guards conclude no further progress can be made (see the returned
+  // DelaunayRefinementResult).
+  // lengthFloor is the absolute insertion length floor (packing guard); if negative it is
+  // computed as refinementMinRelativeLength * (shortest edge at call time).
+  DelaunayRefinementResult delaunayRefine(const std::function<bool(Face)>& shouldRefine,
+                                          size_t maxInsertions = INVALID_IND, double lengthFloor = -1.);
 
 
   // ======================================================
@@ -246,6 +317,11 @@ public:
 
 
 protected:
+  // Absolute insertion length floor currently in force. Set (and restored to -1) by
+  // delaunayRefine(); consulted by insertCircumcenter(), which refuses insertions that
+  // would mint an edge shorter than this. <= 0 means no floor is active.
+  double activeRefinementLengthFloor = -1.;
+
   // The current common subdivision. This member will only be populated if the subdivision is valid.
   // Implementations must sure to call triangulationChanged() below after any modifications, which handles clearing out
   // the common subdivision.

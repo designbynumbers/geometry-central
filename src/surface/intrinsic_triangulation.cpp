@@ -330,7 +330,30 @@ Vertex IntrinsicTriangulation::insertCircumcenter(Face f) {
   }
 
   // === Phase 3: Add the new vertex
+  //
+  // Record whether insertVertex() actually creates a vertex: implementations may
+  // instead snap to a pre-existing vertex (e.g. insertionMinEdgeLength in the
+  // integer-coordinates subclass) and return it. The recorders are registered at
+  // the FRONT of the callback lists so they observe the fresh split before any
+  // later callback (e.g. delaunayRefine's delete-nearby-vertices pass) mutates
+  // the neighborhood.
+  Vertex createdV;
+  auto recordFaceInsertion = [&](Face, Vertex v) { createdV = v; };
+  auto recordEdgeSplit = [&](Edge, Halfedge he1, Halfedge) { createdV = he1.vertex(); };
+  auto hFace = faceInsertionCallbackList.insert(std::begin(faceInsertionCallbackList), recordFaceInsertion);
+  auto hEdge = edgeSplitCallbackList.insert(std::begin(edgeSplitCallbackList), recordEdgeSplit);
   Vertex newV = insertVertex(newPositionOnIntrinsic);
+  faceInsertionCallbackList.erase(hFace);
+  edgeSplitCallbackList.erase(hEdge);
+
+  // Snap guard: if insertVertex() returned a pre-existing vertex, nothing was
+  // inserted. Report failure rather than the snapped-to vertex: delaunayRefine()
+  // would otherwise count the no-op as progress and re-queue the same bad face
+  // with unchanged state, forever. (And never run the undo guards below against
+  // a vertex we did not create.)
+  if (newV != Vertex() && newV != createdV) {
+    return Vertex();
+  }
 
   // Proximity guard: a traced circumcenter can land coincident with an existing
   // vertex (it ends as a Face/Edge point on a triangle corner). This happens on
@@ -341,6 +364,11 @@ Vertex IntrinsicTriangulation::insertCircumcenter(Face f) {
   // delaunayRefine() treats a Vertex() return as "insertion failed" and simply
   // leaves that triangle unrefined (which is the correct behavior near an
   // unrefinable constrained corner).
+  //
+  // Length-floor guard (same undo path): during delaunayRefine(), additionally
+  // refuse insertions whose shortest new edge falls below the active length
+  // floor. This enforces, at runtime, the vertex-spacing invariant that Chew's
+  // termination proof assumes, bounding the total number of insertions.
   if (newV != Vertex()) {
     double minInc = std::numeric_limits<double>::infinity();
     double maxInc = 0.;
@@ -348,7 +376,9 @@ Vertex IntrinsicTriangulation::insertCircumcenter(Face f) {
       minInc = std::min(minInc, edgeLengths[e]);
       maxInc = std::max(maxInc, edgeLengths[e]);
     }
-    if (minInc <= 1e-9 * maxInc) {
+    bool nearDegenerate = minInc <= 1e-9 * maxInc;
+    bool belowFloor = activeRefinementLengthFloor > 0 && minInc < activeRefinementLengthFloor;
+    if (nearDegenerate || belowFloor) {
       removeInsertedVertex(newV);
       return Vertex();
     }
@@ -438,8 +468,8 @@ void IntrinsicTriangulation::flipToDelaunay() {
   refreshQuantities();
 }
 
-void IntrinsicTriangulation::delaunayRefine(double angleThreshDegrees, double circumradiusThresh,
-                                            size_t maxInsertions) {
+DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(double angleThreshDegrees, double circumradiusThresh,
+                                                                size_t maxInsertions) {
 
   // Relationship between angles and circumradius-to-edge
   double angleThreshRad = angleThreshDegrees * M_PI / 180.;
@@ -519,12 +549,35 @@ void IntrinsicTriangulation::delaunayRefine(double angleThreshDegrees, double ci
     return needsRefinementAngle || needsRefinementLength;
   };
 
+  // Compute the absolute insertion length floor (packing guard) for this call: the target
+  // edge-length scale is at least the current shortest edge, except when a small
+  // circumradiusThresh explicitly asks for finer triangles.
+  double lengthFloor = 0.;
+  if (refinementMinRelativeLength > 0.) {
+    double minL = std::numeric_limits<double>::infinity();
+    for (Edge e : mesh.edges()) minL = std::fmin(minL, edgeLengths[e]);
+    double scale = std::fmin(minL, circumradiusThresh);
+    if (std::isfinite(scale)) lengthFloor = refinementMinRelativeLength * scale;
+  }
+
   // Call the general version
-  delaunayRefine(needsCircumcenterRefinement, maxInsertions);
+  return delaunayRefine(needsCircumcenterRefinement, maxInsertions, lengthFloor);
 }
 
 
-void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& shouldRefine, size_t maxInsertions) {
+DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& shouldRefine,
+                                                                size_t maxInsertions, double lengthFloor) {
+
+  DelaunayRefinementResult result;
+
+  // Arm the insertion length floor consulted by insertCircumcenter() (restored on exit).
+  // A negative input means "compute the default from the current shortest edge".
+  if (lengthFloor < 0. && refinementMinRelativeLength > 0.) {
+    double minL = std::numeric_limits<double>::infinity();
+    for (Edge e : mesh.edges()) minL = std::fmin(minL, edgeLengths[e]);
+    lengthFloor = std::isfinite(minL) ? refinementMinRelativeLength * minL : 0.;
+  }
+  activeRefinementLengthFloor = (lengthFloor > 0.) ? lengthFloor : -1.;
 
   // Manages a check at the bottom to avoid infinite-looping when numerical baddness happens
   int recheckCount = 0;
@@ -533,6 +586,17 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
   // Track statistics
   size_t nFlips = 0;
   size_t nInsertions = 0;
+
+  // Flip budget: with an epsilon-thickened floating-point Delaunay test, edge flipping has
+  // no termination theorem; a numerically inconsistent predicate can cycle. Real flip counts
+  // are far below this generous bound (which also grows with each insertion), so exhausting
+  // it means the predicate has become inconsistent -- we stop and report rather than spin.
+  size_t flipBudget = 1000 * mesh.nEdges() + 100000;
+
+  // Stall guard state: history of vertex counts at each recent insertion, used to detect
+  // insert/delete cycles (see refinementStallWindow in the header).
+  bool deletionsEnabled = true;
+  std::deque<size_t> vertexCountHistory;
 
   // Initialize queue of (possibly) non-delaunay edges
   std::deque<Edge> delaunayCheckQueue;
@@ -598,6 +662,18 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
   auto flipToDelaunayFromQueue = [&]() {
     while (!delaunayCheckQueue.empty()) {
 
+      // Budget exhausted: drain the queue without flipping so the outer loop can exit
+      // cleanly (see the comment where flipBudget is initialized).
+      if (nFlips > flipBudget) {
+        result.flipBudgetExhausted = true;
+        while (!delaunayCheckQueue.empty()) {
+          Edge eDrain = delaunayCheckQueue.front();
+          delaunayCheckQueue.pop_front();
+          if (!eDrain.isDead()) inDelaunayQueue[eDrain] = false;
+        }
+        return;
+      }
+
       // Get the top element from the queue of possibily non-Delaunay edges
       Edge e = delaunayCheckQueue.front();
       delaunayCheckQueue.pop_front();
@@ -613,6 +689,10 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
 
   // Register a callback, which will be invoked to delete previously-inserted vertices whenever refinment splits an edge
   auto deleteNearbyVertices = [&](Edge e, Halfedge he1, Halfedge he2) {
+    // Disabled by the stall guard once an insert/delete cycle has been detected; from then
+    // on every insertion grows the mesh, restoring guaranteed progress.
+    if (!deletionsEnabled) return;
+
     // radius of the diametral ball
     double ballRad = std::max(edgeLengths[he1.edge()], edgeLengths[he2.edge()]);
     Vertex newV = he1.vertex();
@@ -637,6 +717,7 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
         Face fReplace = removeInsertedVertex(v);
 
         if (fReplace != Face()) {
+          result.nDeletions++;
 
           // Add adjacent edges for Delaunay check
           for (Edge nE : fReplace.adjacentEdges()) {
@@ -665,10 +746,17 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
     // == First, flip to delaunay
     flipToDelaunayFromQueue();
 
+    // A flip cycle was detected (see flipBudget); further insertion on a non-Delaunay
+    // mesh would only compound the damage, so stop here and report.
+    if (result.flipBudgetExhausted) {
+      break;
+    }
+
     // == Second, insert one circumcenter
 
     // If we've already inserted the max number of points, call it a day
     if (maxInsertions != INVALID_IND && nInsertions == maxInsertions) {
+      result.reachedInsertionBudget = true;
       break;
     }
 
@@ -689,10 +777,31 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
 
         Vertex newVert = insertCircumcenter(f);
         if (newVert == Vertex()) {
-          // vertex insertion failed (probably due to a tracing error)
+          // Insertion refused: a robustness guard fired (snap onto an existing vertex,
+          // near-degenerate or below-floor new edge) or tracing failed. Leave the face
+          // unrefined; it will be reported in the result's unrefinedFaces.
+          result.nRefusedInsertions++;
           continue;
         }
         nInsertions++;
+        flipBudget += 1000; // extend the flip budget to cover the new work
+
+        // Stall guard: watch for many consecutive insertions with no net growth in vertex
+        // count, the signature of an insert/delete cycle (floating-point error has broken
+        // Chew's vertex-spacing argument locally). Disable the delete-nearby-vertices
+        // optimization so that every further insertion makes strict progress; combined
+        // with the insertion length floor, this bounds the total work.
+        if (deletionsEnabled && refinementStallWindow > 0) {
+          vertexCountHistory.push_back(mesh.nVertices());
+          if (vertexCountHistory.size() > refinementStallWindow) {
+            size_t countThen = vertexCountHistory.front();
+            vertexCountHistory.pop_front();
+            if (mesh.nVertices() <= countThen) {
+              deletionsEnabled = false;
+              result.stallDetected = true;
+            }
+          }
+        }
 
         // Mark everything in the 1-ring as possibly non-Delaunay and possibly violating the circumradius constraint
         for (Face nF : newVert.adjacentFaces()) {
@@ -749,6 +858,20 @@ void IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& sho
   refreshQuantities();
   edgeSplitCallbackList.erase(splitCallbackHandle);
   edgeFlipCallbackList.erase(flipCallbackHandle);
+  activeRefinementLengthFloor = -1.;
+
+  // Assemble the result report. "Completed" means the loop ran until its work queues
+  // drained, as opposed to an early exit on a budget.
+  result.completed = !result.reachedInsertionBudget && !result.flipBudgetExhausted;
+  result.nFlips = nFlips;
+  result.nInsertions = nInsertions;
+  for (Face f : mesh.faces()) {
+    if (shouldRefine(f)) {
+      result.unrefinedFaces.push_back(f);
+    }
+  }
+
+  return result;
 }
 
 
