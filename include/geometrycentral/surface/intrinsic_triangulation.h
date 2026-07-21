@@ -44,10 +44,11 @@ struct DelaunayRefinementResult {
   // flip cycle); the mesh may not be fully Delaunay.
   bool flipBudgetExhausted = false;
 
-  // An insert/delete cycle was detected (many insertions with no net growth in
-  // vertex count), and vertex deletion was disabled for the remainder of the
-  // call to restore guaranteed progress. Informational: the result is still
-  // valid, though it may have somewhat more vertices than otherwise.
+  // Terminated early because a confirmed insert/delete stall was detected: a
+  // full window of insertions produced no net growth in vertex count AND no
+  // reduction in the number of criterion-violating faces (see
+  // refinementStallWindow). The mesh is left valid and Delaunay; the faces
+  // that could not be refined are reported in unrefinedFaces.
   bool stallDetected = false;
 
   // Statistics.
@@ -127,11 +128,15 @@ public:
   // looping forever. Set to 0 to disable the guard.
   double refinementMinRelativeLength = 1e-3;
 
-  // Stall guard: if this many consecutive insertions produce no net growth in
-  // vertex count, refinement concludes it is in an insert/delete cycle
-  // (numerics have broken Chew's spacing argument locally) and disables the
-  // delete-nearby-vertices optimization for the remainder of the call, so that
-  // every further insertion makes strict progress. Set to 0 to disable.
+  // Stall guard: if a full window of this many consecutive insertions produces
+  // no net growth in vertex count, refinement runs a confirmation sweep; if the
+  // number of criterion-violating faces has ALSO failed to decrease since the
+  // previous sweep, it concludes it is in an insert/delete cycle (numerics have
+  // broken Chew's spacing argument locally), stops, and reports stallDetected
+  // with the unrefined faces. The two-signal test matters: deletion-heavy
+  // phases with no net vertex growth occur in perfectly healthy refinements
+  // (large diametral balls under a coarse circumradiusThresh), but there the
+  // bad-face count still falls. Set to 0 to disable.
   size_t refinementStallWindow = 100;
 
 

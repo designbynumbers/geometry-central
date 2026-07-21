@@ -593,10 +593,11 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
   // it means the predicate has become inconsistent -- we stop and report rather than spin.
   size_t flipBudget = 1000 * mesh.nEdges() + 100000;
 
-  // Stall guard state: history of vertex counts at each recent insertion, used to detect
-  // insert/delete cycles (see refinementStallWindow in the header).
-  bool deletionsEnabled = true;
+  // Stall guard state: history of vertex counts at each recent insertion (cheap signal),
+  // plus the bad-face count at the previous confirmation sweep (real progress metric).
+  // See refinementStallWindow in the header.
   std::deque<size_t> vertexCountHistory;
+  size_t lastStallSweepBadCount = std::numeric_limits<size_t>::max();
 
   // Initialize queue of (possibly) non-delaunay edges
   std::deque<Edge> delaunayCheckQueue;
@@ -689,10 +690,6 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
 
   // Register a callback, which will be invoked to delete previously-inserted vertices whenever refinment splits an edge
   auto deleteNearbyVertices = [&](Edge e, Halfedge he1, Halfedge he2) {
-    // Disabled by the stall guard once an insert/delete cycle has been detected; from then
-    // on every insertion grows the mesh, restoring guaranteed progress.
-    if (!deletionsEnabled) return;
-
     // radius of the diametral ball
     double ballRad = std::max(edgeLengths[he1.edge()], edgeLengths[he2.edge()]);
     Vertex newV = he1.vertex();
@@ -786,23 +783,6 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
         nInsertions++;
         flipBudget += 1000; // extend the flip budget to cover the new work
 
-        // Stall guard: watch for many consecutive insertions with no net growth in vertex
-        // count, the signature of an insert/delete cycle (floating-point error has broken
-        // Chew's vertex-spacing argument locally). Disable the delete-nearby-vertices
-        // optimization so that every further insertion makes strict progress; combined
-        // with the insertion length floor, this bounds the total work.
-        if (deletionsEnabled && refinementStallWindow > 0) {
-          vertexCountHistory.push_back(mesh.nVertices());
-          if (vertexCountHistory.size() > refinementStallWindow) {
-            size_t countThen = vertexCountHistory.front();
-            vertexCountHistory.pop_front();
-            if (mesh.nVertices() <= countThen) {
-              deletionsEnabled = false;
-              result.stallDetected = true;
-            }
-          }
-        }
-
         // Mark everything in the 1-ring as possibly non-Delaunay and possibly violating the circumradius constraint
         for (Face nF : newVert.adjacentFaces()) {
 
@@ -816,6 +796,36 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
             if (!inDelaunayQueue[nE]) {
               delaunayCheckQueue.push_back(nE);
               inDelaunayQueue[nE] = true;
+            }
+          }
+        }
+
+        // Stall guard (see refinementStallWindow in the header). Cheap signal: a full
+        // window of insertions with no net growth in vertex count. That alone is NOT
+        // proof of an insert/delete cycle -- legitimate deletion-heavy phases (large
+        // diametral balls under a coarse circumradius threshold) look identical -- so
+        // confirm against a real progress metric: the number of criterion-violating
+        // faces must ALSO have failed to decrease since the previous confirmation
+        // sweep. On a confirmed stall, stop and report (leaving the caller a valid
+        // mesh and the list of unrefined faces); never keep refining with a guard
+        // disabled, and never conclude a stall from the cheap signal alone.
+        if (refinementStallWindow > 0) {
+          vertexCountHistory.push_back(mesh.nVertices());
+          if (vertexCountHistory.size() > refinementStallWindow) {
+            size_t countThen = vertexCountHistory.front();
+            vertexCountHistory.pop_front();
+            if (mesh.nVertices() <= countThen) {
+              size_t nBadNow = 0;
+              for (Face fSweep : mesh.faces()) {
+                if (shouldRefine(fSweep)) nBadNow++;
+              }
+              bool confirmedStall = nBadNow >= lastStallSweepBadCount;
+              lastStallSweepBadCount = nBadNow;
+              vertexCountHistory.clear(); // require a fresh full window before re-checking
+              if (confirmedStall) {
+                result.stallDetected = true;
+                break;
+              }
             }
           }
         }
@@ -854,6 +864,10 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
 
   } while (!delaunayCheckQueue.empty() || !circumradiusCheckQueue.empty() || recheckCount < MAX_RECHECK_COUNT);
 
+  // Even on an early exit (insertion budget / stall), leave the caller a Delaunay mesh:
+  // flush any pending flips (still guarded by the flip budget).
+  flipToDelaunayFromQueue();
+
   // Cleanup work: recompute any geometric data, and remove the special callbacks we added
   refreshQuantities();
   edgeSplitCallbackList.erase(splitCallbackHandle);
@@ -861,8 +875,8 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
   activeRefinementLengthFloor = -1.;
 
   // Assemble the result report. "Completed" means the loop ran until its work queues
-  // drained, as opposed to an early exit on a budget.
-  result.completed = !result.reachedInsertionBudget && !result.flipBudgetExhausted;
+  // drained, as opposed to an early exit on a budget or a confirmed stall.
+  result.completed = !result.reachedInsertionBudget && !result.flipBudgetExhausted && !result.stallDetected;
   result.nFlips = nFlips;
   result.nInsertions = nInsertions;
   for (Face f : mesh.faces()) {
