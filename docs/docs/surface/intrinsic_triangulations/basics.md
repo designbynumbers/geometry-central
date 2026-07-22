@@ -18,6 +18,18 @@ Headers:
 #include "geometrycentral/surface/integer_coordinates_intrinsic_triangulation.h"
 ```
 
+## Which mesh is an element on?
+
+Every `IntrinsicTriangulation` involves **two distinct meshes**:
+
+- the **input mesh** (`inputMesh`, with geometry `inputGeom`): fixed, never modified;
+- the **intrinsic mesh** (`intrinsicMesh`, aliased by the inherited member `mesh`, whose geometry is the intrinsic triangulation object itself): initially an index-identical copy of the input mesh, then rewritten freely by flips, insertions, deletions, and refinement.
+
+They are separate objects. Every element handle (`Vertex`/`Edge`/`Face`/`Halfedge`/`Corner`), `SurfacePoint`, and per-element container (`EdgeData`, `VertexData`, ...) is bound to exactly one of them, and each API expects a specific one: **by convention everything is on the intrinsic mesh unless the parameter name or documentation says "input"**. (`vertexLocations` spans both pictures: it is indexed by intrinsic vertices, and its *values* are `SurfacePoint`s on the input mesh.) Convert between the two pictures with `equivalentPointOnIntrinsic()` / `equivalentPointOnInput()`.
+
+!!! warning "Wrong-mesh arguments appear to work — until they don't"
+
+    Because the intrinsic mesh starts as an index-identical copy of the input mesh, a wrong-mesh argument typically *appears to work* until the triangulation is first mutated, and then fails subtly (garbage lookups; containers that never resize and corrupt memory). Public entry points where this mistake is silently index-compatible therefore verify the binding and throw `std::runtime_error`, naming the API, the expected binding, and what was actually passed. If you see one of these errors, build your element/container on the mesh the message names — usually `tri.mesh` — or convert your point with the equivalent-point functions.
 
 ## Example
 
@@ -188,30 +200,34 @@ Note that some additional functions and members can be found in the `IntrinsicTr
   
     Flips edges in the intrinsic triangulation until is satisfies the intrinsic Delaunay criterion.
     
-??? func "`#!cpp void IntrinsicTriangulation::delaunayRefine(double angleThreshDegrees = 25, double circumradiusThresh = inf, size_t maxInsertions = inf)`"
+??? func "`#!cpp DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(double angleThreshDegrees = 25, double circumradiusThresh = inf, size_t maxInsertions = AUTO_INSERTION_BUDGET)`"
 
     Applies Chew's 2nd algorithm to the intrinsic triangulation, flipping edges and inserting vertices until the triangulation simultaneously:
     
      - satisfies the intrinsic Delaunay criterion
      
-     - has no angles smaller than `angleThreshDegrees` (values > 30 degrees may not terminate)
+     - has no angles smaller than `angleThreshDegrees` (values > 30 degrees have no termination guarantee even in exact arithmetic)
      
      - has no triangles larger than `circumradiusThresh`
      
-    Terminates no matter what after `maxInsertions` insertions (infinite by default)
+    Terminates no matter what after `maxInsertions` insertions. The default is an automatic finite budget of `10 * nFaces + 10000`, computed at call time; pass `INVALID_IND` explicitly for unlimited.
 
     The algorithm converges with angle threshold settings up to 30 degrees (away from ultra-skinny needle vertices and boundary angles which cannot be improved).
+
+    **This call always returns in finite time**, even when the goals cannot be met (numerical trouble, unrefinable input corners, budget). Robustness guards refuse insertions that would mint degenerate or below-floor edges (`refinementMinRelativeLength`), detect insert/delete stalls (`refinementStallWindow`), and bound edge flipping; when they fire, the loop stops and reports rather than iterating forever. The returned `DelaunayRefinementResult` says how the loop terminated (`completed` / `reachedInsertionBudget` / `flipBudgetExhausted` / `stallDetected`), gives operation counts (`nInsertions`, `nDeletions`, `nRefusedInsertions`, `nFlips`), and lists `unrefinedFaces` — the faces still violating the criterion on exit. `result.success()` means everything was met; on every exit path the mesh is left valid and flipped to Delaunay. Callers can ignore the return value; existing code compiles unchanged.
   
     
-??? func "`#!cpp void IntrinsicTriangulation::delaunayRefine(cosnt std::function<bool(Face)>& shouldRefine, size_t maxInsertions = inf)`"
+??? func "`#!cpp DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::function<bool(Face)>& shouldRefine, size_t maxInsertions = AUTO_INSERTION_BUDGET)`"
     
-    General version of intrinsic Delaunay refinement, taking a function which will be called to determine if a triangle should be refined. Will return only when all triangles pass this function, or `maxInsertions` is exceeded, so be sure to chose arguments such that the function terminates.
+    General version of intrinsic Delaunay refinement, taking a function which will be called to determine if a triangle should be refined. Returns when all triangles pass this function, when `maxInsertions` is exceeded, or when the robustness guards conclude no further progress can be made (see the returned `DelaunayRefinementResult`, as above).
     
 ??? func "`#!cpp void IntrinsicTriangulation::setMarkedEdges(const EdgeData<bool>& markedEdges)`"
 
     Set a subset of the edges which are special marked edges. If true, the edge is fixed, and will not be flipped (e.g. in `flipToDelaunay()`. 
  
     The class automatically internally hanldes updates to this array as edge splits are performed, so if a marked edge is split the two resulting edges will be marked.
+
+    **Which mesh:** build the `EdgeData` on the *intrinsic* mesh (`tri.mesh`). Data bound to a different mesh with identical edge indexing (e.g. the input mesh, while the triangulation is still an unmutated copy) is accepted and rebound onto the intrinsic mesh; anything else throws. Passing a wrong-mesh container used to silently corrupt memory once refinement grew the mesh — see the warning at the top of this page.
     
 ### Low-Level Mutators
 
