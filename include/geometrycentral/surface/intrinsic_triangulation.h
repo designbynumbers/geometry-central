@@ -26,6 +26,13 @@ namespace surface {
 // See the SIGGRAPH 2021 Course "Geometry Processing with Intrinsic Triangulations" by Nicholas Sharp, Mark Gillespie,
 // and Keenan Crane for an introduction to these techniques.
 
+// Default maxInsertions for delaunayRefine(): an automatic budget of
+// 10 * nFaces + 10000, computed at call time. A divergent refinement (numerics
+// or unrefinable input) on an unlimited budget is an infinite loop, so the
+// default is finite; pass INVALID_IND explicitly for the old unlimited
+// behavior. Hitting the budget is reported via reachedInsertionBudget.
+const size_t AUTO_INSERTION_BUDGET = INVALID_IND - 1;
+
 // Result of delaunayRefine(). The refinement loop is guaranteed to return in
 // finite time; this struct reports how it terminated and what, if anything, was
 // left unrefined, so callers can decide how to proceed (e.g. accept the partial
@@ -128,15 +135,16 @@ public:
   // looping forever. Set to 0 to disable the guard.
   double refinementMinRelativeLength = 1e-3;
 
-  // Stall guard: if a full window of this many consecutive insertions produces
-  // no net growth in vertex count, refinement runs a confirmation sweep; if the
-  // number of criterion-violating faces has ALSO failed to decrease since the
-  // previous sweep, it concludes it is in an insert/delete cycle (numerics have
-  // broken Chew's spacing argument locally), stops, and reports stallDetected
-  // with the unrefined faces. The two-signal test matters: deletion-heavy
-  // phases with no net vertex growth occur in perfectly healthy refinements
-  // (large diametral balls under a coarse circumradiusThresh), but there the
-  // bad-face count still falls. Set to 0 to disable.
+  // Stall guard: refinement evaluates progress over tumbling windows of this
+  // many insertions, and declares a stall (stops, reports stallDetected + the
+  // unrefined faces) only when consecutive windows show no progress on ALL
+  // THREE of: (1) net growth of the vertices inserted by this call, (2)
+  // deletion of vertices that predate this call (each drains a finite pool, so
+  // it is progress by itself -- restructuring refines on constrained meshes
+  // are legitimately deletion-dominant with little or no net growth), and (3)
+  // the number of criterion-violating faces (checked by an O(n) sweep run at
+  // most once per window, only when (1) and (2) already show no progress).
+  // Set to 0 to disable.
   size_t refinementStallWindow = 100;
 
 
@@ -227,16 +235,17 @@ public:
   //   - has no angles smaller than `angleThreshDegrees` (values > 30 degrees have no
   //     termination guarantee even in exact arithmetic)
   //   - has no triangles larger than `circumradiusThresh`
-  // Terminates no matter what after maxInsertions insertions (infinite by default).
+  // Terminates no matter what after maxInsertions insertions. The default is an automatic
+  // finite budget (see AUTO_INSERTION_BUDGET); pass INVALID_IND for unlimited.
   //
-  // Always returns in finite time: when the goals cannot be met (numerical
-  // trouble, unrefinable input corners, budget), the robustness guards (see
-  // refinementMinRelativeLength / refinementStallWindow above) stop the loop
+  // Always returns in finite time (given a finite insertion budget): when the goals
+  // cannot be met (numerical trouble, unrefinable input corners, budget), the robustness
+  // guards (see refinementMinRelativeLength / refinementStallWindow above) stop the loop
   // and the returned DelaunayRefinementResult reports what happened and which
   // faces remain unrefined, rather than iterating forever.
   DelaunayRefinementResult delaunayRefine(double angleThreshDegrees = 25.,
                                           double circumradiusThresh = std::numeric_limits<double>::infinity(),
-                                          size_t maxInsertions = INVALID_IND);
+                                          size_t maxInsertions = AUTO_INSERTION_BUDGET);
 
 
   // General version of intrinsic Delaunay refinement, taking a function which will be called
@@ -247,7 +256,7 @@ public:
   // lengthFloor is the absolute insertion length floor (packing guard); if negative it is
   // computed as refinementMinRelativeLength * (shortest edge at call time).
   DelaunayRefinementResult delaunayRefine(const std::function<bool(Face)>& shouldRefine,
-                                          size_t maxInsertions = INVALID_IND, double lengthFloor = -1.);
+                                          size_t maxInsertions = AUTO_INSERTION_BUDGET, double lengthFloor = -1.);
 
 
   // ======================================================

@@ -447,6 +447,76 @@ TEST_F(IntrinsicTriangulationSuite, RefineAggressiveAngleTerminates) {
   }
 }
 
+// setMarkedEdges() must rebind EdgeData built on a foreign-but-index-compatible mesh
+// (almost always the input mesh) onto the intrinsic mesh. Storing the caller's container
+// as-is left it registered with the other mesh, so it never resized as refinement grew
+// the intrinsic mesh: isFixed() read out of bounds and the marked-split propagation wrote
+// out of bounds -- silent memory corruption causing nondeterministic crashes/runaways
+// (found via a wild pendel capture). This test refines with input-mesh-bound marked
+// edges, which under the old code walks off the container.
+TEST_F(IntrinsicTriangulationSuite, MarkedEdgesOnInputMeshRebound) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  // Build marked edges on the INPUT mesh (index-compatible with the fresh intrinsic mesh)
+  EdgeData<bool> markedOnInput(mesh, false);
+  size_t count = 0;
+  for (Edge e : mesh.edges()) {
+    if (count % 20 == 0) markedOnInput[e] = true;
+    count++;
+  }
+  tri.setMarkedEdges(markedOnInput);
+
+  DelaunayRefinementResult result = tri.delaunayRefine();
+
+  // Refinement grew the mesh; every isFixed() lookup beyond the input edge count is
+  // in-bounds only if the data was rebound.
+  EXPECT_GT(tri.mesh.nEdges(), mesh.nEdges());
+  EXPECT_TRUE(result.completed);
+  EXPECT_TRUE(tri.isDelaunay());
+}
+
+// Once the intrinsic mesh has been mutated, input-mesh indexing no longer matches, and
+// setMarkedEdges() must refuse loudly instead of corrupting memory.
+TEST_F(IntrinsicTriangulationSuite, MarkedEdgesIncompatibleMeshThrows) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+  tri.insertBarycenter(tri.mesh.face(0)); // mutate: intrinsic mesh no longer matches input
+
+  EdgeData<bool> markedOnInput(mesh, false);
+  EXPECT_THROW(tri.setMarkedEdges(markedOnInput), std::runtime_error);
+}
+
+// Constrained refinement with fixed (seam) edges: the stall guard must not fire on
+// legitimate constrained refines, and marked edges must survive splits.
+TEST_F(IntrinsicTriangulationSuite, RefineWithMarkedEdgesConverges) {
+  auto a = getAsset("cat_head.obj", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  EdgeData<bool> marked(tri.mesh, false); // built on the intrinsic mesh
+  size_t count = 0;
+  for (Edge e : tri.mesh.edges()) {
+    if (count % 15 == 0) marked[e] = true;
+    count++;
+  }
+  tri.setMarkedEdges(marked);
+
+  DelaunayRefinementResult result = tri.delaunayRefine();
+
+  EXPECT_TRUE(result.completed);
+  EXPECT_FALSE(result.stallDetected);
+  EXPECT_TRUE(tri.isDelaunay());
+}
+
 TEST_F(IntrinsicTriangulationSuite, SignpostRefineResultConverged) {
   auto a = getAsset("fox.ply", true);
   ManifoldSurfaceMesh& mesh = *a.manifoldMesh;

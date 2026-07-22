@@ -56,7 +56,27 @@ IntrinsicTriangulation::IntrinsicTriangulation(ManifoldSurfaceMesh& mesh_, Intri
 IntrinsicTriangulation::~IntrinsicTriangulation() {}
 
 void IntrinsicTriangulation::setMarkedEdges(const EdgeData<bool>& markedEdges_) {
-  markedEdges = markedEdges_;
+  if (markedEdges_.getMesh() == &mesh) {
+    markedEdges = markedEdges_;
+  } else {
+    // The caller built their EdgeData on a different mesh -- almost always the input
+    // mesh, whose edges a fresh (unmutated) intrinsic mesh mirrors index-for-index.
+    // Storing that container as-is would leave it registered with the OTHER mesh, so it
+    // would never resize as refinement grows the intrinsic mesh: every isFixed() lookup
+    // on a new edge would read out of bounds, and the marked-edge split propagation
+    // (updateMarkedEdges, registered in the constructor) would WRITE out of bounds -- silent memory
+    // corruption in release builds, with nondeterministic downstream failures. Rebind
+    // the data onto the intrinsic mesh when the indexing is provably compatible, and
+    // refuse loudly otherwise.
+    if (markedEdges_.getMesh() == nullptr || markedEdges_.getMesh()->nEdges() != mesh.nEdges() ||
+        !markedEdges_.getMesh()->isCompressed() || !mesh.isCompressed()) {
+      throw std::runtime_error(
+          "setMarkedEdges(): the EdgeData is bound to a mesh whose edge indexing does not match this "
+          "triangulation's intrinsic mesh. Build the EdgeData on tri.mesh (the intrinsic mesh), or pass "
+          "input-mesh data only while the intrinsic triangulation is still an unmutated copy of the input.");
+    }
+    markedEdges = markedEdges_.reinterpretTo(mesh);
+  }
   markedEdges.setDefault(false);
 }
 
@@ -570,6 +590,11 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
 
   DelaunayRefinementResult result;
 
+  // Resolve the automatic insertion budget (see AUTO_INSERTION_BUDGET in the header)
+  if (maxInsertions == AUTO_INSERTION_BUDGET) {
+    maxInsertions = 10 * mesh.nFaces() + 10000;
+  }
+
   // Arm the insertion length floor consulted by insertCircumcenter() (restored on exit).
   // A negative input means "compute the default from the current shortest edge".
   if (lengthFloor < 0. && refinementMinRelativeLength > 0.) {
@@ -593,11 +618,24 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
   // it means the predicate has become inconsistent -- we stop and report rather than spin.
   size_t flipBudget = 1000 * mesh.nEdges() + 100000;
 
-  // Stall guard state: history of vertex counts at each recent insertion (cheap signal),
-  // plus the bad-face count at the previous confirmation sweep (real progress metric).
-  // See refinementStallWindow in the header.
-  std::deque<size_t> vertexCountHistory;
+  // Stall guard state (see refinementStallWindow in the header). Three progress signals
+  // are tracked over tumbling windows of refinementStallWindow insertions:
+  //   1. net growth of the SAME-CALL vertex population (insertions minus deletions of
+  //      vertices this call inserted) -- growth is progress toward the packing bound;
+  //   2. deletions of PRE-CALL vertices -- each drains a finite pool exactly once, so it
+  //      is progress by itself (mass-restructuring refines on constrained meshes are
+  //      dominated by this, with little or no net growth: deletion IS the progress);
+  //   3. the number of criterion-violating faces (checked by an O(n) sweep, at most once
+  //      per window, and only when signals 1 and 2 both show no progress).
+  // Only when all three show no progress across consecutive windows is a stall declared.
+  VertexData<bool> insertedThisCall(mesh, false);
+  size_t nSameCallDeletions = 0;
+  size_t nPreCallDeletions = 0;
+  size_t insertionsAtWindowStart = 0;
+  size_t netSameCallAtWindowStart = 0;
+  size_t preCallDeletionsAtWindowStart = 0;
   size_t lastStallSweepBadCount = std::numeric_limits<size_t>::max();
+  int consecutiveStallConfirms = 0;
 
   // Initialize queue of (possibly) non-delaunay edges
   std::deque<Edge> delaunayCheckQueue;
@@ -711,10 +749,16 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
     for (auto p : nearbyVerts) {
       Vertex v = p.first;
       if (v != newV && !isOnFixedEdge(v) && vertexLocations[v].type != SurfacePointType::Vertex) {
+        bool wasInsertedThisCall = insertedThisCall[v]; // must read before removal kills v
         Face fReplace = removeInsertedVertex(v);
 
         if (fReplace != Face()) {
           result.nDeletions++;
+          if (wasInsertedThisCall) {
+            nSameCallDeletions++;
+          } else {
+            nPreCallDeletions++;
+          }
 
           // Add adjacent edges for Delaunay check
           for (Edge nE : fReplace.adjacentEdges()) {
@@ -782,6 +826,7 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
         }
         nInsertions++;
         flipBudget += 1000; // extend the flip budget to cover the new work
+        insertedThisCall[newVert] = true;
 
         // Mark everything in the 1-ring as possibly non-Delaunay and possibly violating the circumradius constraint
         for (Face nF : newVert.adjacentFaces()) {
@@ -800,33 +845,47 @@ DelaunayRefinementResult IntrinsicTriangulation::delaunayRefine(const std::funct
           }
         }
 
-        // Stall guard (see refinementStallWindow in the header). Cheap signal: a full
-        // window of insertions with no net growth in vertex count. That alone is NOT
-        // proof of an insert/delete cycle -- legitimate deletion-heavy phases (large
-        // diametral balls under a coarse circumradius threshold) look identical -- so
-        // confirm against a real progress metric: the number of criterion-violating
-        // faces must ALSO have failed to decrease since the previous confirmation
-        // sweep. On a confirmed stall, stop and report (leaving the caller a valid
-        // mesh and the list of unrefined faces); never keep refining with a guard
-        // disabled, and never conclude a stall from the cheap signal alone.
-        if (refinementStallWindow > 0) {
-          vertexCountHistory.push_back(mesh.nVertices());
-          if (vertexCountHistory.size() > refinementStallWindow) {
-            size_t countThen = vertexCountHistory.front();
-            vertexCountHistory.pop_front();
-            if (mesh.nVertices() <= countThen) {
-              size_t nBadNow = 0;
-              for (Face fSweep : mesh.faces()) {
-                if (shouldRefine(fSweep)) nBadNow++;
-              }
-              bool confirmedStall = nBadNow >= lastStallSweepBadCount;
-              lastStallSweepBadCount = nBadNow;
-              vertexCountHistory.clear(); // require a fresh full window before re-checking
-              if (confirmedStall) {
-                result.stallDetected = true;
-                break;
-              }
+        // Stall guard: evaluate each full window of insertions against the three
+        // progress signals described where the guard state is declared. A stall is
+        // declared only after enough consecutive windows in which (1) the same-call
+        // vertex population did not grow, (2) no pre-call vertex was drained, and
+        // (3) confirmation sweeps show the criterion-violating face count
+        // non-decreasing. On a confirmed stall, stop and report (leaving the caller
+        // a valid mesh and the list of unrefined faces); never keep refining with a
+        // safety mechanism disabled.
+        if (refinementStallWindow > 0 && nInsertions - insertionsAtWindowStart >= refinementStallWindow) {
+          size_t netSameCall = nInsertions - nSameCallDeletions;
+          bool sameCallGrew = netSameCall > netSameCallAtWindowStart;
+          bool preCallDrained = nPreCallDeletions > preCallDeletionsAtWindowStart;
+
+          bool confirmedStall = false;
+          if (sameCallGrew || preCallDrained) {
+            // Progress by counters alone; no sweep needed. Reset the sweep baseline so
+            // stale bad-face counts from long ago can't confirm a future stall.
+            consecutiveStallConfirms = 0;
+            lastStallSweepBadCount = std::numeric_limits<size_t>::max();
+          } else {
+            size_t nBadNow = 0;
+            for (Face fSweep : mesh.faces()) {
+              if (shouldRefine(fSweep)) nBadNow++;
             }
+            if (nBadNow >= lastStallSweepBadCount) {
+              consecutiveStallConfirms++;
+            } else {
+              consecutiveStallConfirms = 0;
+            }
+            lastStallSweepBadCount = nBadNow;
+            confirmedStall = consecutiveStallConfirms >= 2;
+          }
+
+          // Start the next window
+          insertionsAtWindowStart = nInsertions;
+          netSameCallAtWindowStart = nInsertions - nSameCallDeletions;
+          preCallDeletionsAtWindowStart = nPreCallDeletions;
+
+          if (confirmedStall) {
+            result.stallDetected = true;
+            break;
           }
         }
       }
