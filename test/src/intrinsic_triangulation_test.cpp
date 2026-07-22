@@ -517,6 +517,66 @@ TEST_F(IntrinsicTriangulationSuite, RefineWithMarkedEdgesConverges) {
   EXPECT_TRUE(tri.isDelaunay());
 }
 
+// === Which-mesh guards: every public entry point where a wrong-mesh argument would be
+// === silently index-compatible must throw a clear error instead (see the two-mesh note
+// === in intrinsic_triangulation.h).
+
+TEST_F(IntrinsicTriangulationSuite, WhichMeshGuardsThrowInteger) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  IntegerCoordinatesIntrinsicTriangulation tri(mesh, origGeometry);
+
+  // Intrinsic-expecting APIs, fed input-mesh elements
+  EXPECT_THROW(tri.insertCircumcenter(mesh.face(0)), std::runtime_error);
+  EXPECT_THROW(tri.insertBarycenter(mesh.face(0)), std::runtime_error);
+  EXPECT_THROW(tri.insertVertex(SurfacePoint(mesh.face(0), Vector3::constant(1. / 3.))), std::runtime_error);
+  EXPECT_THROW(tri.removeInsertedVertex(mesh.vertex(0)), std::runtime_error);
+  EXPECT_THROW(tri.flipEdgeIfNotDelaunay(mesh.edge(0)), std::runtime_error);
+  EXPECT_THROW(tri.flipEdgeIfPossible(mesh.edge(0)), std::runtime_error);
+  EXPECT_THROW(tri.splitFace(mesh.face(0), Vector3::constant(1. / 3.)), std::runtime_error);
+  EXPECT_THROW(tri.equivalentPointOnInput(SurfacePoint(mesh.vertex(0))), std::runtime_error);
+  EXPECT_THROW(tri.traceIntrinsicHalfedgeAlongInput(mesh.halfedge(0)), std::runtime_error);
+  EXPECT_THROW(tri.getParentFace(mesh.face(0)), std::runtime_error);
+
+  // Input-expecting APIs, fed intrinsic-mesh elements
+  EXPECT_THROW(tri.equivalentPointOnIntrinsic(SurfacePoint(tri.mesh.vertex(0))), std::runtime_error);
+  EXPECT_THROW(tri.traceInputHalfedgeAlongIntrinsic(tri.mesh.halfedge(0)), std::runtime_error);
+  EXPECT_THROW(tri.traceInputEdge(tri.mesh.edge(0)), std::runtime_error);
+
+  // MeshData bindings on sample/restrict
+  VertexData<double> onIntrinsic(tri.mesh, 0.);
+  VertexData<double> onInput(mesh, 0.);
+  EXPECT_THROW(tri.sampleFromInput(onIntrinsic), std::runtime_error);
+  EXPECT_THROW(tri.restrictToInput(onInput), std::runtime_error);
+
+  // Correctly-bound calls still work
+  EXPECT_NO_THROW(tri.sampleFromInput(onInput));
+  EXPECT_NO_THROW(tri.restrictToInput(onIntrinsic));
+  EXPECT_NO_THROW(tri.equivalentPointOnIntrinsic(SurfacePoint(mesh.vertex(0))));
+  EXPECT_NO_THROW(tri.equivalentPointOnInput(SurfacePoint(tri.mesh.vertex(0))));
+  EXPECT_NE(tri.insertBarycenter(tri.mesh.face(0)), Vertex());
+}
+
+TEST_F(IntrinsicTriangulationSuite, WhichMeshGuardsThrowSignpost) {
+  auto a = getAsset("fox.ply", true);
+  ManifoldSurfaceMesh& mesh = *a.manifoldMesh;
+  VertexPositionGeometry& origGeometry = *a.geometry;
+
+  SignpostIntrinsicTriangulation tri(mesh, origGeometry);
+
+  EXPECT_THROW(tri.insertVertex(SurfacePoint(mesh.face(0), Vector3::constant(1. / 3.))), std::runtime_error);
+  EXPECT_THROW(tri.removeInsertedVertex(mesh.vertex(0)), std::runtime_error);
+  EXPECT_THROW(tri.flipEdgeIfNotDelaunay(mesh.edge(0)), std::runtime_error);
+  EXPECT_THROW(tri.equivalentPointOnIntrinsic(SurfacePoint(tri.mesh.vertex(0))), std::runtime_error);
+  EXPECT_THROW(tri.equivalentPointOnInput(SurfacePoint(mesh.vertex(0))), std::runtime_error);
+  EXPECT_THROW(tri.traceInputHalfedgeAlongIntrinsic(tri.mesh.halfedge(0)), std::runtime_error);
+
+  EXPECT_NO_THROW(tri.equivalentPointOnIntrinsic(SurfacePoint(mesh.vertex(0))));
+  EXPECT_NE(tri.insertBarycenter(tri.mesh.face(0)), Vertex());
+}
+
 TEST_F(IntrinsicTriangulationSuite, SignpostRefineResultConverged) {
   auto a = getAsset("fox.ply", true);
   ManifoldSurfaceMesh& mesh = *a.manifoldMesh;

@@ -53,6 +53,7 @@ std::vector<SurfacePoint> SignpostIntrinsicTriangulation::traceIntrinsicHalfedge
 }
 
 std::vector<SurfacePoint> SignpostIntrinsicTriangulation::traceIntrinsicHalfedgeAlongInput(Halfedge he, bool trimEnd) {
+  requireIntrinsic(he, "traceIntrinsicHalfedgeAlongInput()");
 
   // Optimization: don't bother tracing original edges, just report them directly
   if (edgeIsOriginal[he.edge()]) {
@@ -101,6 +102,7 @@ std::vector<SurfacePoint> SignpostIntrinsicTriangulation::traceInputHalfedgeAlon
 
 std::vector<SurfacePoint> SignpostIntrinsicTriangulation::traceInputHalfedgeAlongIntrinsic(Halfedge inputHe,
                                                                                            bool trimEnd) {
+  requireInput(inputHe, "traceInputHalfedgeAlongIntrinsic()");
 
   // Optimization: don't bother tracing original edges, just report them directly
   // Here we need to check if the corresponding intrinsic edge is original
@@ -147,6 +149,7 @@ std::vector<SurfacePoint> SignpostIntrinsicTriangulation::traceInputHalfedgeAlon
 }
 
 SurfacePoint SignpostIntrinsicTriangulation::equivalentPointOnIntrinsic(const SurfacePoint& pointOnInput) {
+  requireInput(pointOnInput, "equivalentPointOnIntrinsic()");
 
   // If it's a vertex, just return the matching vertex
   if (pointOnInput.type == SurfacePointType::Vertex) {
@@ -212,6 +215,7 @@ SurfacePoint SignpostIntrinsicTriangulation::equivalentPointOnIntrinsic(const Su
 }
 
 SurfacePoint SignpostIntrinsicTriangulation::equivalentPointOnInput(const SurfacePoint& pointOnIntrinsic) {
+  requireIntrinsic(pointOnIntrinsic, "equivalentPointOnInput()");
 
   // If it's a vertex, just return the vertex location
   if (pointOnIntrinsic.type == SurfacePointType::Vertex) {
@@ -276,6 +280,7 @@ bool SignpostIntrinsicTriangulation::checkEdgeOriginal(Edge e) const { return ed
 // ======================================================
 
 bool SignpostIntrinsicTriangulation::flipEdgeIfNotDelaunay(Edge e) {
+  requireIntrinsic(e, "flipEdgeIfNotDelaunay()");
 
   // Can't flip
   if (isFixed(e)) return false;
@@ -322,6 +327,7 @@ bool SignpostIntrinsicTriangulation::flipEdgeIfNotDelaunay(Edge e) {
 }
 
 bool SignpostIntrinsicTriangulation::flipEdgeIfPossible(Edge e) {
+  requireIntrinsic(e, "flipEdgeIfPossible()");
 
   // Can't flip
   if (isFixed(e)) return false;
@@ -374,6 +380,7 @@ bool SignpostIntrinsicTriangulation::flipEdgeIfPossible(Edge e) {
 
 void SignpostIntrinsicTriangulation::flipEdgeManual(Edge e, double newLength, double forwardAngle, double reverseAngle,
                                                     bool isOrig, bool reverseFlip) {
+  requireIntrinsic(e, "flipEdgeManual()");
 
   int flipCount = reverseFlip ? 3 : 1; // three flips give opposite orientaiton
   for (int i = 0; i < flipCount; i++) {
@@ -398,6 +405,7 @@ void SignpostIntrinsicTriangulation::flipEdgeManual(Edge e, double newLength, do
 
 
 Vertex SignpostIntrinsicTriangulation::insertVertex(SurfacePoint newPositionOnIntrinsic) {
+  requireIntrinsic(newPositionOnIntrinsic, "insertVertex()");
   switch (newPositionOnIntrinsic.type) {
   case SurfacePointType::Vertex: {
     throw std::logic_error("can't insert vertex at vertex");
@@ -596,6 +604,7 @@ Vertex SignpostIntrinsicTriangulation::insertVertex_face(SurfacePoint newP) {
 }
 
 Face SignpostIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
+  requireIntrinsic(v, "removeInsertedVertex()");
   // Strategy: flip edges until the vertex has degree three, then remove by replacing with a single face
   // TODO needs a proof that this always works... what about self edges, etc? Seems to work well.
 
@@ -639,6 +648,7 @@ Face SignpostIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
 }
 
 Halfedge SignpostIntrinsicTriangulation::splitEdge(Halfedge he, double tSplit) {
+  requireIntrinsic(he, "splitEdge()");
   return insertVertex_edge(SurfacePoint(he, tSplit));
 }
 

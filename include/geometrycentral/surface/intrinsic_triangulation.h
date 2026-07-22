@@ -16,6 +16,26 @@ namespace surface {
 // which sits on top of some original domain. This motivates many additional operations which involve the correspondence
 // with the original mesh.
 //
+// == The two-mesh model: which mesh is an element on?
+//
+// Every IntrinsicTriangulation involves TWO distinct meshes:
+//   - the INPUT mesh (`inputMesh`, geometry `inputGeom`): fixed, never modified here;
+//   - the INTRINSIC mesh (`intrinsicMesh`, aliased by the inherited member `mesh`, whose geometry
+//     is this object itself): initially an index-identical copy of the input mesh, then rewritten
+//     freely by flips, insertions, deletions, and refinement.
+// They are separate objects. Every element handle (Vertex/Edge/Face/Halfedge/Corner), SurfacePoint,
+// and per-element container (MeshData/EdgeData/VertexData/...) is bound to exactly one of them, and
+// each API here expects a specific one: BY CONVENTION EVERYTHING IS ON THE INTRINSIC MESH unless the
+// parameter name or documentation says "input". (`vertexLocations` spans both pictures: it is
+// indexed by intrinsic vertices, and its VALUES are SurfacePoints on the input mesh.) Convert
+// between the pictures with equivalentPointOnIntrinsic() / equivalentPointOnInput().
+//
+// DANGER: because the intrinsic mesh starts as an index-identical copy of the input mesh, a
+// wrong-mesh argument typically *appears to work* until the triangulation is first mutated, and
+// then fails subtly (garbage lookups; containers that never resize and corrupt memory). Public
+// entry points where this mistake is silently index-compatible therefore verify the binding and
+// throw std::runtime_error on a wrong-mesh argument.
+//
 //
 // Several different underlying intrinsic triangulation datastructures support this paradigm:
 // - SignpostIntrinsicTriangulation
@@ -331,6 +351,31 @@ public:
 
 
 protected:
+  // === Which-mesh guards (see "The two-mesh model" at the top of this file)
+  //
+  // Verify at an API boundary that an argument is bound to the expected mesh, throwing
+  // std::runtime_error otherwise; one pointer compare per call. These exist because the two
+  // meshes are index-identical until the triangulation is mutated, so a wrong-mesh argument
+  // "works" in small tests and then silently misbehaves in production.
+  //
+  // The SurfacePoint overloads deliberately PASS an empty/uninitialized point (null mesh):
+  // several routines accept an empty point and answer with their documented refusal value
+  // (e.g. insertVertex returning Vertex()), and the guards must not turn those refusal
+  // paths into throws. The element-handle templates throw on null: no guarded API accepts
+  // a null element handle.
+  void throwWhichMeshError(const char* apiName, const char* expected, const SurfaceMesh* got) const;
+  const SurfaceMesh* meshOf(const SurfacePoint& p) const;
+  void requireIntrinsic(const SurfacePoint& p, const char* apiName) const;
+  void requireInput(const SurfacePoint& p, const char* apiName) const;
+  template <typename E>
+  void requireIntrinsic(E elem, const char* apiName) const {
+    if (elem.getMesh() != &mesh) throwWhichMeshError(apiName, "intrinsic", elem.getMesh());
+  }
+  template <typename E>
+  void requireInput(E elem, const char* apiName) const {
+    if (elem.getMesh() != &inputMesh) throwWhichMeshError(apiName, "input", elem.getMesh());
+  }
+
   // Absolute insertion length floor currently in force. Set (and restored to -1) by
   // delaunayRefine(); consulted by insertCircumcenter(), which refuses insertions that
   // would mint an edge shorter than this. <= 0 means no floor is active.

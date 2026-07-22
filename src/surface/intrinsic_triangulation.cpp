@@ -82,6 +82,51 @@ void IntrinsicTriangulation::setMarkedEdges(const EdgeData<bool>& markedEdges_) 
 
 void IntrinsicTriangulation::clearMarkedEdges() { markedEdges = EdgeData<bool>(); }
 
+// === Which-mesh guards (see the two-mesh note in the header)
+
+void IntrinsicTriangulation::throwWhichMeshError(const char* apiName, const char* expected,
+                                                 const SurfaceMesh* got) const {
+  std::string gotDesc;
+  if (got == nullptr) {
+    gotDesc = "an uninitialized element (null mesh)";
+  } else if (got == &mesh) {
+    gotDesc = "an element of the INTRINSIC mesh";
+  } else if (got == &inputMesh) {
+    gotDesc = "an element of the INPUT mesh";
+  } else {
+    gotDesc = "an element of some unrelated third mesh";
+  }
+  throw std::runtime_error(std::string(apiName) + ": expected an element bound to the " + std::string(expected) +
+                           " mesh, but received " + gotDesc +
+                           ". The intrinsic and input meshes are distinct objects whose element indices coincide "
+                           "only until the intrinsic triangulation is mutated, so a wrong-mesh argument can appear "
+                           "to work in small examples and fail subtly later; see the two-mesh note in "
+                           "intrinsic_triangulation.h. Convert between the two pictures with "
+                           "equivalentPointOnIntrinsic() / equivalentPointOnInput().");
+}
+
+const SurfaceMesh* IntrinsicTriangulation::meshOf(const SurfacePoint& p) const {
+  switch (p.type) {
+  case SurfacePointType::Vertex:
+    return p.vertex.getMesh();
+  case SurfacePointType::Edge:
+    return p.edge.getMesh();
+  case SurfacePointType::Face:
+    return p.face.getMesh();
+  }
+  return nullptr;
+}
+
+void IntrinsicTriangulation::requireIntrinsic(const SurfacePoint& p, const char* apiName) const {
+  const SurfaceMesh* m = meshOf(p);
+  if (m != nullptr && m != &mesh) throwWhichMeshError(apiName, "intrinsic", m);
+}
+
+void IntrinsicTriangulation::requireInput(const SurfacePoint& p, const char* apiName) const {
+  const SurfaceMesh* m = meshOf(p);
+  if (m != nullptr && m != &inputMesh) throwWhichMeshError(apiName, "input", m);
+}
+
 // ======================================================
 // ======== Queries & Accessors
 // ======================================================
@@ -188,6 +233,7 @@ double IntrinsicTriangulation::minFixedAngleDegrees() const {
 // If f is entirely contained in some face of the input mesh, return that
 // face Otherwise return Face()
 Face IntrinsicTriangulation::getParentFace(Face f) const {
+  requireIntrinsic(f, "getParentFace()");
   auto containsVertex = [](Face f, Vertex v) -> bool {
     for (Vertex vF : f.adjacentVertices()) {
       if (vF == v) return true;
@@ -314,6 +360,7 @@ double IntrinsicTriangulation::minAngleDegreesAtValidFaces(double minAngleSum) c
 
 
 Vertex IntrinsicTriangulation::insertCircumcenter(Face f) {
+  requireIntrinsic(f, "insertCircumcenter()");
 
   // === Circumcenter in barycentric coordinates
 
@@ -407,6 +454,7 @@ Vertex IntrinsicTriangulation::insertCircumcenter(Face f) {
 }
 
 Vertex IntrinsicTriangulation::insertBarycenter(Face f) {
+  requireIntrinsic(f, "insertBarycenter()");
   SurfacePoint barycenterOnIntrinsic(f, Vector3::constant(1. / 3.));
   return insertVertex(barycenterOnIntrinsic);
 }

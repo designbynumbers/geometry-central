@@ -21,6 +21,7 @@ inline bool IntrinsicTriangulation::isOnFixedEdge(Vertex v) const {
 
 template <typename T>
 VertexData<T> IntrinsicTriangulation::sampleFromInput(const VertexData<T>& dataOnInput) {
+  if (dataOnInput.getMesh() != &inputMesh) throwWhichMeshError("sampleFromInput()", "input", dataOnInput.getMesh());
   VertexData<T> output(mesh);
   for (Vertex v : mesh.vertices()) {
     output[v] = vertexLocations[v].interpolate(dataOnInput);
@@ -30,6 +31,7 @@ VertexData<T> IntrinsicTriangulation::sampleFromInput(const VertexData<T>& dataO
 
 template <typename T>
 VertexData<T> IntrinsicTriangulation::restrictToInput(const VertexData<T>& dataOnIntrinsic) {
+  if (dataOnIntrinsic.getMesh() != &mesh) throwWhichMeshError("restrictToInput()", "intrinsic", dataOnIntrinsic.getMesh());
   VertexData<T> output(inputMesh);
   for (Vertex v : mesh.vertices()) {
     if (vertexLocations[v].type == SurfacePointType::Vertex) {

@@ -75,6 +75,7 @@ EdgeData<std::vector<SurfacePoint>> IntegerCoordinatesIntrinsicTriangulation::tr
 
 std::vector<SurfacePoint>
 IntegerCoordinatesIntrinsicTriangulation::traceIntrinsicHalfedgeAlongInput(Halfedge intrinsicHe) {
+  requireIntrinsic(intrinsicHe, "traceIntrinsicHalfedgeAlongInput()");
   CommonSubdivision& cs = getCommonSubdivision();
 
   std::vector<SurfacePoint> trajectory;
@@ -108,6 +109,7 @@ EdgeData<std::vector<SurfacePoint>> IntegerCoordinatesIntrinsicTriangulation::tr
 }
 
 std::vector<SurfacePoint> IntegerCoordinatesIntrinsicTriangulation::traceInputHalfedgeAlongIntrinsic(Halfedge inputHe) {
+  requireInput(inputHe, "traceInputHalfedgeAlongIntrinsic()");
   if (commonSubdivision) {
     // If the common subdivision has already been computed, just read off values
 
@@ -171,6 +173,7 @@ std::vector<SurfacePoint> IntegerCoordinatesIntrinsicTriangulation::traceInputHa
 }
 
 SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnIntrinsic(const SurfacePoint& pointOnInput) {
+  requireInput(pointOnInput, "equivalentPointOnIntrinsic()");
   // Note: the edge and face cases below read off the answer from the common
   // subdivision; the first such query after a mutation pays to (re)construct
   // it, while subsequent queries are cheap.
@@ -299,6 +302,7 @@ SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnIntrinsi
 }
 
 SurfacePoint IntegerCoordinatesIntrinsicTriangulation::equivalentPointOnInput(const SurfacePoint& pointOnIntrinsic) {
+  requireIntrinsic(pointOnIntrinsic, "equivalentPointOnInput()");
   switch (pointOnIntrinsic.type) {
   case SurfacePointType::Vertex:
     return vertexLocations[pointOnIntrinsic.vertex];
@@ -737,6 +741,7 @@ void IntegerCoordinatesIntrinsicTriangulation::constructCommonSubdivision() {
 // If the edge is not Delaunay, flip it. Returns true if flipped.
 // TODO
 bool IntegerCoordinatesIntrinsicTriangulation::flipEdgeIfNotDelaunay(Edge e) {
+  requireIntrinsic(e, "flipEdgeIfNotDelaunay()");
   // Can't flip
   if (isFixed(e)) return false;
 
@@ -799,6 +804,7 @@ bool IntegerCoordinatesIntrinsicTriangulation::flipEdgeIfNotDelaunay(Edge e) {
 // and inside a convex quad). Returns true if flipped.
 // TODO
 bool IntegerCoordinatesIntrinsicTriangulation::flipEdgeIfPossible(Edge e) {
+  requireIntrinsic(e, "flipEdgeIfPossible()");
   // Can't flip
   if (isFixed(e)) return false;
 
@@ -867,6 +873,7 @@ bool IntegerCoordinatesIntrinsicTriangulation::flipEdgeIfPossible(Edge e) {
 
 
 double IntegerCoordinatesIntrinsicTriangulation::checkFlip(Edge e) {
+  requireIntrinsic(e, "checkFlip()");
   // Can't flip
   if (isFixed(e)) return std::numeric_limits<double>::infinity();
 
@@ -899,6 +906,7 @@ double IntegerCoordinatesIntrinsicTriangulation::checkFlip(Edge e) {
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::insertCircumcenterOrSplitSegment(Face f, bool verbose) {
+  requireIntrinsic(f, "insertCircumcenterOrSplitSegment()");
   // === Circumcenter in barycentric coordinates
 
   Halfedge he0 = f.halfedge();
@@ -993,6 +1001,7 @@ void IntegerCoordinatesIntrinsicTriangulation::updateHalfedgeVectorsInVertex(Ver
 // returns the halfedge in the input mesh pointing in the same direction
 // e.vertex() must live in both meshes
 Halfedge IntegerCoordinatesIntrinsicTriangulation::getSharedInputEdge(Halfedge he) const {
+  requireIntrinsic(he, "getSharedInputEdge()");
   GC_SAFETY_ASSERT(vertexLocations[he.tailVertex()].type == SurfacePointType::Vertex,
                    "I can only identify edges which come out of shared vertices");
 
@@ -1574,6 +1583,7 @@ std::pair<SurfacePoint, size_t> IntegerCoordinatesIntrinsicTriangulation::comput
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertex(SurfacePoint pt) {
+  requireIntrinsic(pt, "insertVertex()");
   // Refuse insertions coincident with an existing vertex (return that
   // vertex instead): near-coincident vertices create near-zero-length
   // intrinsic edges whose degenerate geometry poisons later floating point
@@ -1664,6 +1674,7 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertex(SurfacePoint pt) {
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::splitFace(Face f, Vector3 bary, bool verbose) {
+  requireIntrinsic(f, "splitFace()");
   // std::clock_t tStart = std::clock();
 
   std::array<Vector2, 3> vertCoords = vertexCoordinatesInFace(f);
@@ -1726,15 +1737,18 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::splitFace(Face f, Vector3 bary,
 }
 
 Halfedge IntegerCoordinatesIntrinsicTriangulation::splitEdge(Halfedge he, double tSplit) {
+  requireIntrinsic(he, "splitEdge()");
   return (he.edge().isBoundary()) ? splitBoundaryEdge(he, tSplit) : splitInteriorEdge(he, tSplit);
 }
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::splitEdge(Edge e, double bary, bool verbose) {
+  requireIntrinsic(e, "splitEdge()");
   return (e.isBoundary()) ? splitBoundaryEdge(e.halfedge(), bary, verbose).vertex()
                           : splitInteriorEdge(e.halfedge(), bary, verbose).vertex();
 }
 
 Halfedge IntegerCoordinatesIntrinsicTriangulation::splitBoundaryEdge(Halfedge he, double bary, bool verbose) {
+  requireIntrinsic(he, "splitBoundaryEdge()");
   Edge e = he.edge();
 
   auto heBary = [&](Halfedge he, double t) -> Vector3 {
@@ -1908,6 +1922,7 @@ Halfedge IntegerCoordinatesIntrinsicTriangulation::splitBoundaryEdge(Halfedge he
 }
 
 Halfedge IntegerCoordinatesIntrinsicTriangulation::splitInteriorEdge(Halfedge he, double bary, bool verbose) {
+  requireIntrinsic(he, "splitInteriorEdge()");
   Edge e = he.edge();
 
   // verbose |= (he.getIndex() == 51146) || true;
@@ -2110,6 +2125,7 @@ Edge IntegerCoordinatesIntrinsicTriangulation::bestFlippableEdgeAround(Vertex v)
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertexAtCrossing(Halfedge he, int crossingIndex,
                                                                         bool verbose) {
+  requireIntrinsic(he, "insertVertexAtCrossing()");
   Edge e = he.edge();
   GC_SAFETY_ASSERT(normalCoordinates[e] > 0, "insertVertexAtCrossing requires an edge with transverse crossings");
   GC_SAFETY_ASSERT(crossingIndex >= 0 && crossingIndex < normalCoordinates[e], "crossing index out of range");
@@ -2264,6 +2280,7 @@ Vertex IntegerCoordinatesIntrinsicTriangulation::insertVertexAtCrossing(Halfedge
 }
 
 Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedVertex(Vertex v) {
+  requireIntrinsic(v, "removeInsertedVertex()");
   // Stolen from geometrycentral/signpost_intrinsic_triangulation.cpp
   // Strategy: flip edges until the vertex has degree three, then remove by
   // replacing with a single face
@@ -2439,6 +2456,7 @@ Face IntegerCoordinatesIntrinsicTriangulation::removeInsertedBoundaryVertex(Vert
 
 
 Vertex IntegerCoordinatesIntrinsicTriangulation::moveVertex(Vertex v, Vector2 vec) {
+  requireIntrinsic(v, "moveVertex()");
 
   // Find the insertion location
   TraceOptions options;
@@ -2473,11 +2491,13 @@ size_t IntegerCoordinatesIntrinsicTriangulation::nSubdividedVertices() const {
 // he} where n is the number of arcs parallel to he.edge() Trace an edge
 // of the input mesh over the intrinsic triangulation
 NormalCoordinatesCompoundCurve IntegerCoordinatesIntrinsicTriangulation::traceInputEdge(Edge e, bool verbose) const {
+  requireInput(e, "traceInputEdge()");
   return traceInputHalfedge(e.halfedge(), verbose);
 }
 
 NormalCoordinatesCompoundCurve IntegerCoordinatesIntrinsicTriangulation::traceInputHalfedge(Halfedge inputHe,
                                                                                             bool verbose) const {
+  requireInput(inputHe, "traceInputHalfedge()");
   // verbose = verbose || e.getIndex() == 18027;
 
   auto vertexHalfedge = [&](Vertex v, size_t iH) {
@@ -2924,6 +2944,7 @@ Face IntegerCoordinatesIntrinsicTriangulation::inputFaceOfUncrossedEdge(Edge e) 
 // Identify shared halfedge, throw exception if halfedge is not shared
 // (i.e. edgeCoords[he.edge()] must be negative)
 Halfedge IntegerCoordinatesIntrinsicTriangulation::identifyInputEdge(Halfedge he) const {
+  requireIntrinsic(he, "identifyInputEdge()");
   GC_SAFETY_ASSERT(normalCoordinates[he.edge()] < 0, "shared edge must have edgeCoord -1");
 
   auto vertexHalfedge = [&](Vertex v, size_t iH) {
@@ -2984,6 +3005,7 @@ std::array<Vector2, 3> IntegerCoordinatesIntrinsicTriangulation::vertexCoordinat
 // If f is entirely contained in some face of the input mesh, return that
 // face Otherwise return Face()
 Face IntegerCoordinatesIntrinsicTriangulation::getParentFace(Face f) const {
+  requireIntrinsic(f, "getParentFace()");
   auto containsVertex = [](Face f, Vertex v) -> bool {
     for (Vertex vF : f.adjacentVertices()) {
       if (vF == v) return true;

@@ -189,7 +189,8 @@ public:
 
   std::array<Vector2, 3> vertexCoordinatesInFace(Face face) const;
 
-  void setFixedEdges(const EdgeData<bool>& fixedEdges);
+  // (A `setFixedEdges` declaration used to sit here: it was never implemented and never
+  // callable -- any use was a link error. Use setMarkedEdges() on the base class.)
 
   // The input face containing the wedge at heOut's tail vertex in which
   // heOut lies. The input edges through the vertex partition its
